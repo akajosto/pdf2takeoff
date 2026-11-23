@@ -6,6 +6,7 @@ import {
   groupsOf,
   groupTotal,
   valueParts,
+  quantityForMarkup,
   formatMarkupValue,
   buildMatrix,
   toDelimited,
@@ -81,7 +82,7 @@ export function initTable(): void {
           recordTakeoffHistory();
           m.links ??= [];
           if (!m.links.some((x) => x.markupId === targetMarkup.id)) {
-            m.links.push({ markupId: targetMarkup.id, logic: '' });
+            m.links.push({ markupId: targetMarkup.id, variable: String.fromCharCode(65 + m.links.length), logic: '' });
             expandedIds.add(m.id);
             syncUpsertMarkup(m);
             emit();
@@ -181,7 +182,7 @@ export function initTable(): void {
   tbody.addEventListener('change', (e) => {
     const input = e.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
     const markupId = input.dataset.timesingFor || input.dataset.signFor || input.dataset.remarksFor ||
-      input.dataset.parameterKeyFor || input.dataset.parameterValueFor || input.dataset.linkTargetFor || input.dataset.linkLogicFor;
+      input.dataset.parameterKeyFor || input.dataset.parameterValueFor || input.dataset.linkTargetFor || input.dataset.linkLogicFor || input.dataset.linkVariableFor || input.dataset.formulaFor;
     if (markupId) {
       const m = state.markups.find((x) => x.id === markupId);
       if (!m) return;
@@ -209,6 +210,20 @@ export function initTable(): void {
       } else if (input.dataset.parameterValueFor) {
         recordTakeoffHistory();
         if (m.parameters) m.parameters[input.dataset.parameterKey ?? ''] = input.value;
+      } else if (input.dataset.formulaFor) {
+        recordTakeoffHistory();
+        const formula = input.value.trim();
+        if (formula) m.formula = formula;
+        else delete m.formula;
+      } else if (input.dataset.linkVariableFor) {
+        const index = Number(input.dataset.linkIndex);
+        const duplicate = m.links?.some((link, i) => i !== index && (link.variable || String.fromCharCode(65 + i)) === input.value);
+        if (duplicate) {
+          input.value = m.links?.[index]?.variable || String.fromCharCode(65 + index);
+          return;
+        }
+        recordTakeoffHistory();
+        if (m.links?.[index]) m.links[index].variable = input.value;
       } else if (input.dataset.linkTargetFor) {
         recordTakeoffHistory();
         const index = Number(input.dataset.linkIndex);
@@ -322,7 +337,8 @@ export function renderTable(): void {
     const tr = document.createElement('tr');
     tr.dataset.id = m.id;
     if (m.id === state.selectedId) tr.classList.add('selected');
-    const { value } = valueParts(m, calibrationForMarkup(m), state.displayUnit);
+    const quantity = quantityForMarkup(m, state.markups, calibrationForMarkup);
+    const { value } = valueParts(m, calibrationForMarkup(m), state.displayUnit, quantity);
     const typeIcon =
       m.type === 'length' ? '📏' : m.type === 'area' ? '⬡' : m.type === 'count' ? '🔢'
       : m.type === 'perimeter' ? '↻' : m.type === 'volume' ? '◨' : m.type === 'note' ? '💬' : '∠';
@@ -330,7 +346,7 @@ export function renderTable(): void {
       <td class="cell-label"><input data-label-for="${m.id}" value="${escapeAttr(m.label)}" title="Rename" /></td>
       <td class="cell-type"><span class="tag tag-${m.type}" title="${m.type}">${typeIcon} <span class="tag-word">${m.type}</span></span><input class="markup-color" type="color" data-color-for="${m.id}" value="${m.color || COLORS[m.type] || '#333333'}" title="Set colour (default is automatic)" aria-label="Colour for ${escapeAttr(m.label)}" /></td>
       <td class="cell-num">p${m.page}</td>
-      <td class="cell-measure">${value ? `${escapeHtml(formatMarkupValue(m, calibrationForMarkup(m), state.displayUnit))}` : '<span class="warn">not calibrated</span>'}</td>
+      <td class="cell-measure">${value ? `${escapeHtml(formatMarkupValue(m, calibrationForMarkup(m), state.displayUnit, quantity))}` : '<span class="warn">not calibrated</span>'}</td>
       <td class="cell-status"><button data-status-for="${m.id}" class="status-btn st-${m.status ?? 'none'}" title="${m.status === 'check' ? 'Needs checking — click to confirm' : m.status === 'confirmed' ? 'Confirmed — click to clear' : 'Click to mark for checking'}">${m.status === 'check' ? '⚑' : m.status === 'confirmed' ? '✓' : '○'}</button></td>
       <td class="cell-del"><button data-visibility-for="${m.id}" title="${m.visible === false ? 'Show on drawing' : 'Hide on drawing'}">${m.visible === false ? '◉' : '◌'}</button><button data-clone-for="${m.id}" title="Clone measurement">⧉</button><button data-del="${m.id}" title="Delete">✕</button></td>`;
     tbody.appendChild(tr);
@@ -348,9 +364,10 @@ export function renderTable(): void {
         <button type="button" class="btn quiet" data-add-param-for="${m.id}">+ Add attribute</button>
       </div>
       <div class="markup-links"><b>Linked take-off</b>
-        ${(m.links ?? []).map((link, index) => `<div class="markup-link"><select data-link-target-for="${m.id}" data-link-index="${index}">${state.markups.filter((x) => x.id !== m.id).map((x) => `<option value="${x.id}" ${x.id === link.markupId ? 'selected' : ''}>${escapeAttr(x.label)} · p${x.page}</option>`).join('')}</select><input type="text" aria-label="Your relationship or QS logic" data-link-logic-for="${m.id}" data-link-index="${index}" value="${escapeAttr(link.logic ?? link.note ?? link.relation ?? '')}" placeholder="Describe your linking logic (optional)"><button type="button" data-remove-link="${m.id}::${index}" title="Remove link">×</button></div>`).join('')}
+        ${(m.links ?? []).map((link, index) => `<div class="markup-link"><label class="link-variable">Variable <select data-link-variable-for="${m.id}" data-link-index="${index}">${Array.from({length:26},(_,i)=>String.fromCharCode(65+i)).map((v)=>`<option value="${v}" ${v === (link.variable || String.fromCharCode(65 + index)) ? 'selected' : ''}>${v}</option>`).join('')}</select></label><select data-link-target-for="${m.id}" data-link-index="${index}">${state.markups.filter((x) => x.id !== m.id).map((x) => `<option value="${x.id}" ${x.id === link.markupId ? 'selected' : ''}>${escapeAttr(x.label)} · p${x.page}</option>`).join('')}</select><input type="text" aria-label="Relationship note" data-link-logic-for="${m.id}" data-link-index="${index}" value="${escapeAttr(link.logic ?? link.note ?? link.relation ?? '')}" placeholder="Optional note"><button type="button" data-remove-link="${m.id}::${index}" title="Remove link">×</button></div>`).join('')}
+        <label class="wide">Quantity formula <input type="text" data-formula-for="${m.id}" value="${escapeAttr(m.formula ?? '')}" placeholder="A-B-C" title="Use linked measurement variables A, B, C… and + - * / % parentheses"></label>
+        <small>Linked values update live. A, B, C… refer to the linked measurements above. Example: A-B-C deducts openings from a wall quantity. Formula cycles or missing links are flagged as unavailable. Use compatible units.</small>
         <button type="button" class="btn quiet" data-add-link-for="${m.id}" ${state.markups.length < 2 || (m.links ?? []).length >= state.markups.length - 1 ? 'disabled' : ''}>+ Link to another measurement</button>
-        <small>Links are references only. You decide what each relationship means and apply any QS calculation logic yourself; creating or editing a link never changes measured quantities.</small>
       </div>
       <small>Adjusted quantity = measured quantity × timesing × sign. Defaults for older projects are 1 and +.</small>
     </details></td>`;
@@ -379,7 +396,7 @@ function renderTotals(): void {
   const selected = state.markups.find((m) => m.id === state.selectedId);
   const focus = state.focusLabel ?? (selected ? groupKey(selected) : null);
   for (const g of gs) {
-    const { total, uncalibrated } = groupTotal(g, calibrationForMarkup);
+    const { total, uncalibrated } = groupTotal(g, calibrationForMarkup, state.markups);
     let value = '';
     let unit = '';
     if (g.type === 'count') [value, unit] = [String(total ?? 0), 'ea'];
