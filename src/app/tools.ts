@@ -125,6 +125,8 @@ let loupePointer = { x: 0, y: 0, valid: false };
 let loupeOffset = { x: 28, y: 28 };
 let loupeDragging = false;
 let loupeDragStart = { x: 0, y: 0, offsetX: 28, offsetY: 28 };
+let loupeFrame = 0;
+let loupePending = { x: 0, y: 0 };
 const LOUPE_MAGNIFICATION = 2.5;
 let draft: Pt[] = [];
 let cursor: Pt | null = null;
@@ -297,18 +299,18 @@ function positionLoupe(): void {
 }
 
 /** Copy the live page canvas and SVG overlay into a movable, magnified window. */
-function refreshLoupe(e: PointerEvent): void {
+function refreshLoupe(clientX: number, clientY: number): void {
   if (!loupeEnabled || !loupeRoot || !loupeContent || !loupeViewport) return;
   const page = svg.parentElement;
   const sourceCanvas = document.getElementById('pdfCanvas') as HTMLCanvasElement | null;
   if (!page || !sourceCanvas || !sourceCanvas.width || !sourceCanvas.height) return;
   const rect = page.getBoundingClientRect();
-  const x = e.clientX - rect.left;
-  const y = e.clientY - rect.top;
+  const x = clientX - rect.left;
+  const y = clientY - rect.top;
   const width = page.clientWidth;
   const height = page.clientHeight;
   if (x < 0 || y < 0 || x > width || y > height || !width || !height) return;
-  loupePointer = { x: e.clientX, y: e.clientY, valid: true };
+  loupePointer = { x: clientX, y: clientY, valid: true };
 
   const viewWidth = loupeViewport.clientWidth;
   const viewHeight = loupeViewport.clientHeight;
@@ -374,7 +376,10 @@ function setLoupeEnabled(enabled: boolean): void {
   button?.classList.toggle('active', enabled);
   button?.setAttribute('aria-pressed', String(enabled));
   if (!enabled) loupeRoot?.classList.add('hidden');
-  else hint('Precision loupe enabled · move over the drawing; drag its title bar to reposition it');
+  else {
+    hint('Precision loupe enabled · move over the drawing; drag its title bar to reposition it');
+    if (loupePointer.valid) refreshLoupe(loupePointer.x, loupePointer.y);
+  }
 }
 
 export function initTools(overlay: SVGSVGElement): void {
@@ -424,11 +429,37 @@ export function initTools(overlay: SVGSVGElement): void {
   });
   window.addEventListener('pointerup', () => { loupeDragging = false; });
   svg.addEventListener('pointermove', onPointerMove);
-  // Registered after onPointerMove so the copied SVG includes the latest preview and snap glyph.
-  svg.addEventListener('pointermove', refreshLoupe);
+  // Track the pointer independently of the active tool. The loupe must also
+  // work in Select mode and should appear immediately if toggled while the
+  // pointer is already over the sheet. Drawing into its raster is capped at
+  // one update per animation frame to avoid competing with pointer feedback.
+  window.addEventListener('pointermove', (event) => {
+    if (loupeDragging) {
+      positionLoupe();
+      return;
+    }
+    const rect = svg.getBoundingClientRect();
+    const inside = event.clientX >= rect.left && event.clientX <= rect.right &&
+      event.clientY >= rect.top && event.clientY <= rect.bottom;
+    if (!inside) {
+      if (loupeEnabled) {
+        loupePointer.valid = false;
+        loupeRoot?.classList.add('hidden');
+      }
+      return;
+    }
+    loupePointer = { x: event.clientX, y: event.clientY, valid: true };
+    if (!loupeEnabled || loupeFrame) return;
+    loupePending = { x: event.clientX, y: event.clientY };
+    loupeFrame = requestAnimationFrame(() => {
+      loupeFrame = 0;
+      refreshLoupe(loupePending.x, loupePending.y);
+    });
+  });
   svg.addEventListener('pointerleave', () => {
     cursor = null;
     refreshPreview();
+    if (loupeEnabled) loupeRoot?.classList.add('hidden');
   });
   svg.addEventListener('dblclick', onDoubleClick);
   window.addEventListener('keydown', onKeyDown);
