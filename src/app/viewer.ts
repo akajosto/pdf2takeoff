@@ -44,6 +44,12 @@ const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 16;
 const MAX_CANVAS_PIXELS = 2.5e7;
 
+let zoomChangeHandler: ((zoom: number) => void) | null = null;
+
+export function setZoomChangeHandler(handler: ((zoom: number) => void) | null): void {
+  zoomChangeHandler = handler;
+}
+
 export function initViewer(
   scroll: HTMLElement,
   page: HTMLElement,
@@ -285,7 +291,11 @@ export function zoomAt(clientX: number, clientY: number, factor: number): void {
   const desiredTop = afterOriginY + pageY * z2 - pointerY;
   scrollEl.scrollLeft = Math.max(0, desiredLeft);
   scrollEl.scrollTop = Math.max(0, desiredTop);
-  emit();
+  // Wheel gestures can fire dozens of times per second. Avoid broadcasting a
+  // full application state update (tables, layers, library and persistence)
+  // for each tick; the host updates the zoom readout and debounces the raster.
+  if (zoomChangeHandler) zoomChangeHandler(state.zoom);
+  else emit();
 }
 
 function clampZoom(z: number): number {
