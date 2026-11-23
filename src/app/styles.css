@@ -2345,7 +2345,7 @@ table.demo-results td.mono {
 
 
 /* Drawing-only display filters: measurements and annotations remain in colour. */
-#pdfCanvas#pdfCanvas { filter: var(--drawing-filter, none) var(--page-tone-filter, none); }
+#pdfCanvas { filter: var(--drawing-filter, ) var(--page-tone-filter, ); }
 #pdfCanvas.drawing-grayscale { --drawing-filter: grayscale(1) contrast(1.12); }
 #pdfCanvas.drawing-blueprint {
   --drawing-filter: grayscale(1) invert(1) sepia(1) saturate(5) hue-rotate(165deg) brightness(.72) contrast(1.45);
