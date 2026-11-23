@@ -35,6 +35,8 @@ export interface ItemAttrs {
 export interface MarkupLink {
   /** The other markup's stable id. */
   markupId: string;
+  /** Formula variable used by the parent measurement (A, B, C...). */
+  variable?: string;
   /** User-authored description of the relationship or intended QS logic. Never executed automatically. */
   logic?: string;
   /** Legacy field retained as inert text when opening older project files. */
@@ -73,6 +75,8 @@ export interface Markup {
   remarks?: string;
   /** Directed take-off relationships to other measurement entries. */
   links?: MarkupLink[];
+  /** Optional live quantity formula over linked measurements, e.g. A-B-C. */
+  formula?: string;
 }
 
 export interface Calibration {
