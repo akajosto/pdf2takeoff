@@ -99,5 +99,32 @@ const linkedExport = buildMatrix({ markups: linkedMarkups, calibrations: linkedC
 const doorRow = linkedExport.find((r) => r[0] === 'D01 timber door');
 check('user-authored link logic is retained in the export as descriptive text', doorRow && String(doorRow[11]).includes('Deduct opening area'));
 
+
+const linkedLengthA = { ...wall('formula-a', 1), label: 'Measured external girth' };
+const linkedLengthB = { ...wall('formula-b', 1), label: 'Door opening width' };
+const netWall = {
+  ...wall('formula-net', 1),
+  label: 'Net wall length',
+  links: [
+    { markupId: 'formula-a', variable: 'A' },
+    { markupId: 'formula-b', variable: 'B' },
+  ],
+  formula: 'A-B',
+};
+const formulaSet = [linkedLengthA, linkedLengthB, netWall];
+const formulaData = { markups: formulaSet, calibrations: new Map([[1, { metersPerPt: 0.01, source: 'test' }]]), displayUnit: 'm' };
+const formulaMatrix = buildMatrix(formulaData);
+const netRow = formulaMatrix.find((r) => r[0] === 'Net wall length');
+check('linked quantity formula A-B calculates a live derived quantity', netRow && near(netRow[7], 0) && near(netRow[8], 0));
+check('linked formula is included in the measurement export', netRow && netRow[12] === 'A-B');
+const formulaGroup = formulaMatrix.slice(formulaMatrix.findIndex((r) => r[0] === 'Group') + 1).find((r) => r[0] === 'Net wall length');
+check('formula-derived quantity appears in group totals', formulaGroup && near(formulaGroup[3], 0));
+
+const cycleA = { ...wall('cycle-a', 1), formula: 'B', links: [{ markupId: 'cycle-b', variable: 'B' }] };
+const cycleB = { ...wall('cycle-b', 1), formula: 'A', links: [{ markupId: 'cycle-a', variable: 'A' }] };
+const cycleData = { markups: [cycleA, cycleB], calibrations: new Map([[1, { metersPerPt: 0.01, source: 'test' }]]), displayUnit: 'm' };
+const cycleMatrix = buildMatrix(cycleData);
+check('circular linked formulas return an unavailable quantity rather than recurse', cycleMatrix.find((r) => r[0] === 'cycle-a')?.[8] === '');
+
 if (failed) process.exit(1);
 console.log('PASS: export group totals (per-item scales, unscaled items, counts)');
