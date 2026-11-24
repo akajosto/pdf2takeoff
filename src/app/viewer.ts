@@ -435,12 +435,12 @@ async function paintCanvas(page: pdfjsLib.PDFPageProxy, mySeq: number, strict = 
     return;
   }
   if (mySeq !== renderSeq || !doc) { if (renderTask === task) renderTask = null; return; }
+  if (renderTask === task) renderTask = null;
   canvas.width = nextCanvas.width; canvas.height = nextCanvas.height;
   const visible = canvas.getContext('2d');
   if (!visible) throw new Error('Could not access the visible PDF canvas.');
   visible.drawImage(nextCanvas, 0, 0); applyLayoutSize();
   if (onFirstRender) { onFirstRender(); onFirstRender = null; }
-  if (renderTask === task) renderTask = null;
 }
 export function viewSize(): { w: number; h: number } {
   return viewport1 ? { w: viewport1.width, h: viewport1.height } : { w: 0, h: 0 };

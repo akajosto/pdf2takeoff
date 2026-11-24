@@ -93,7 +93,7 @@ assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, markups:
     }),
     async () => { throw new Error('activation work failed'); },
     async () => { disposed = true; },
-  ), /ownership is unresolved/);
+  ), (error) => error instanceof AggregateError && error.errors.some((item) => String(item).includes('ownership is unresolved')));
   assert.equal(disposed, false);
 }
 
