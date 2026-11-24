@@ -1,5 +1,5 @@
 import { DISPLAY_UNITS, type DisplayUnit } from '../engine/units.ts';
-import type { Calibration, DrawingAnnotation, ItemAttrs, Markup, MarkupType, Pt } from '../engine/types';
+import type { Calibration, ItemAttrs, Markup, MarkupType, Pt } from '../engine/types';
 import type { CustomColumn } from '../engine/export';
 import type { Viewport } from '../engine/viewports';
 import type { ToolPreset } from './state';
@@ -7,7 +7,6 @@ import type { ToolPreset } from './state';
 type ProjectLayerState = {
   activeLayer?: string;
   hidden?: string[];
-  layers?: { name: string; color?: string; locked?: boolean; order?: number }[];
 };
 
 export interface ProjectFile extends Record<string, unknown> {
@@ -23,7 +22,6 @@ export interface ProjectFile extends Record<string, unknown> {
   presets?: ToolPreset[];
   columns?: CustomColumn[];
   template?: string | null;
-  annotations?: DrawingAnnotation[];
   layerState?: ProjectLayerState;
 }
 
@@ -49,7 +47,6 @@ export interface ProjectOpenSteps {
 }
 
 const MARKUP_TYPES: MarkupType[] = ['length', 'area', 'count', 'perimeter', 'volume', 'angle', 'note'];
-const ANNOTATION_KINDS = ['line', 'arrow', 'rectangle', 'ellipse', 'highlight', 'cloud', 'text'];
 const ITEM_KINDS = ['Door', 'Window', 'Space'];
 const ITEM_SOURCES = ['model', 'vector', 'cv', 'ocr', 'user'];
 const DOOR_TYPES = ['swing', 'double_swing', 'sliding', 'pocket', 'bifold', 'garage', 'french_glazed', 'other'];
@@ -109,15 +106,6 @@ function isMarkup(value: unknown): value is Markup {
     (value.visible === undefined || typeof value.visible === 'boolean') &&
     (value.lineStyle === undefined || ['solid', 'dashed', 'dotted'].includes(String(value.lineStyle)));
 }
-function isAnnotation(value: unknown): value is DrawingAnnotation {
-  return isRecord(value) && typeof value.id === 'string' && !!value.id &&
-    isPositivePage(value.page) && ANNOTATION_KINDS.includes(String(value.kind)) &&
-    Array.isArray(value.points) && value.points.every(isPoint) &&
-    ['color', 'text'].every((key) => value[key] === undefined || typeof value[key] === 'string') &&
-    (value.lineStyle === undefined || ['solid', 'dashed', 'dotted'].includes(String(value.lineStyle))) &&
-    ['fillOpacity', 'opacity', 'strokeWidth'].every((key) => value[key] === undefined ||
-      (typeof value[key] === 'number' && Number.isFinite(value[key])));
-}
 function isViewport(value: unknown): value is Viewport {
   return isRecord(value) && typeof value.id === 'string' && !!value.id &&
     isPositivePage(value.page) && Array.isArray(value.points) && value.points.every(isPoint) &&
@@ -136,7 +124,6 @@ function validateProject(project: Record<string, unknown>): asserts project is P
   if (project.pageNum !== undefined && !isPositivePage(project.pageNum)) invalidField('page number');
   if (project.displayUnit !== undefined && !DISPLAY_UNITS.includes(project.displayUnit as DisplayUnit)) invalidField('display unit');
   if (project.markups !== undefined && (!Array.isArray(project.markups) || !project.markups.every(isMarkup))) invalidField('measurements');
-  if (project.annotations !== undefined && (!Array.isArray(project.annotations) || !project.annotations.every(isAnnotation))) invalidField('annotations');
   if (project.calibrations !== undefined && (!Array.isArray(project.calibrations) ||
       !project.calibrations.every((entry) => Array.isArray(entry) && entry.length === 2 && isPositivePage(entry[0]) && isCalibration(entry[1])) ||
       new Set(project.calibrations.map((entry) => entry[0])).size !== project.calibrations.length)) invalidField('calibrations');
@@ -150,38 +137,23 @@ function validateProject(project: Record<string, unknown>): asserts project is P
     const v = project.layerState;
     if (!isRecord(v) ||
         (v.activeLayer !== undefined && typeof v.activeLayer !== 'string') ||
-        (v.hidden !== undefined && (!Array.isArray(v.hidden) || !v.hidden.every((x) => typeof x === 'string'))) ||
-        (v.layers !== undefined && (!Array.isArray(v.layers) || !v.layers.every((x) => isRecord(x) &&
-          typeof x.name === 'string' && (x.color === undefined || typeof x.color === 'string') &&
-          (x.locked === undefined || typeof x.locked === 'boolean') &&
-          (x.order === undefined || (typeof x.order === 'number' && Number.isFinite(x.order))))))) invalidField('layer state');
+        (v.hidden !== undefined && (!Array.isArray(v.hidden) || !v.hidden.every((x) => typeof x === 'string')))) invalidField('layer state');
   }
   if (Array.isArray(project.markups)) {
     const ids = project.markups.map((m) => (m as Markup).id);
     if (new Set(ids).size !== ids.length) invalidField('measurements (duplicate ids)');
-    const byId = new Map(project.markups.map((m) => [m.id, m]));
-    for (const m of project.markups) {
-      let parent = m.parentId;
-      const seen = new Set([m.id]);
-      while (parent && byId.has(parent)) {
-        if (seen.has(parent)) invalidField('measurement parent hierarchy');
-        seen.add(parent);
-        parent = byId.get(parent)?.parentId;
-      }
-    }
+
   }
-  for (const [field, list] of [['annotations', project.annotations], ['viewports', project.viewports]] as const) {
-    if (Array.isArray(list)) {
-      const ids = list.map((v) => v.id);
-      if (new Set(ids).size !== ids.length) invalidField(`${field} (duplicate ids)`);
-    }
+  if (Array.isArray(project.viewports)) {
+    const ids = project.viewports.map((v) => v.id);
+    if (new Set(ids).size !== ids.length) invalidField('viewports (duplicate ids)');
   }
 }
 
 export function validateProjectPageReferences(project: ProjectFile, pageCount: number): void {
   if (!Number.isInteger(pageCount) || pageCount < 1) throw new Error('The PDF contains no pages.');
   const pages = [project.pageNum, ...(project.markups ?? []).map((m) => m.page),
-    ...(project.annotations ?? []).map((a) => a.page), ...(project.calibrations ?? []).map(([p]) => p),
+...(project.calibrations ?? []).map(([p]) => p),
     ...(project.viewports ?? []).map((v) => v.page)].filter((p): p is number => p !== undefined);
   const invalid = pages.find((p) => p < 1 || p > pageCount);
   if (invalid !== undefined) throw new Error(`Project data refers to page ${invalid}, but the embedded PDF has ${pageCount} pages.`);

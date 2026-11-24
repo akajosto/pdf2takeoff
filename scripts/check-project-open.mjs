@@ -29,10 +29,6 @@ assert.throws(() => validateProjectPageReferences({ ...decoded.project, pageNum:
 
 const duplicateMarkup = { id: 'm1', page: 1, type: 'count', label: 'Door', points: [{ x: 1, y: 2 }], createdAt: 1 };
 assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, markups: [duplicateMarkup, duplicateMarkup] })), /duplicate ids/);
-const cyclicA = { ...duplicateMarkup, id: 'a', parentId: 'b' };
-const cyclicB = { ...duplicateMarkup, id: 'b', parentId: 'a' };
-assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, markups: [cyclicA, cyclicB] })), /parent hierarchy/);
-
 {
   let destroyed = false;
   await assert.rejects(() => openPdfTask({
