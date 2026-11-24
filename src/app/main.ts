@@ -140,7 +140,8 @@ async function openBytes(bytes: Uint8Array, name: string, notes: string[] = []):
         const errors: unknown[] = [];
         try { importLayerState(previousLayers); } catch (error) { errors.push(error); }
         try { renderMarkups(); } catch (error) { errors.push(error); }
-        try { resumeSession?.(false); } catch (error) { errors.push(error); }
+        try { setTool(state.tool); } catch (error) { errors.push(error); }
+        try { resumeSession?.(false); catch (error) { errors.push(error); }
         resumeSession = null;
         if (errors.length) throw new AggregateError(errors, 'PDF-open application rollback was incomplete.');
       },
@@ -212,7 +213,8 @@ async function openProject(file: File): Promise<void> {
             const errors: unknown[] = [];
             try { importLayerState(previousLayers); } catch (error) { errors.push(error); }
             for (const action of [renderMarkups, renderColumns, renderLibrary, renderLayers]) { try { action(); } catch (error) { errors.push(error); } }
-            try { resumeSession?.(false); } catch (error) { errors.push(error); }
+            try { setTool(state.tool); } catch (error) { errors.push(error); }
+            try { resumeSession?.(false); catch (error) { errors.push(error); }
             resumeSession = null;
             if (errors.length) throw new AggregateError(errors, 'Project-open application rollback was incomplete.');
           },
