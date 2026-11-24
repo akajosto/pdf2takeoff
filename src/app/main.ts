@@ -12,7 +12,7 @@ import { playDemo, stopDemo } from './demo';
 import { exportXlsx } from './table';
 import { initPageStrip } from './pagestrip';
 import { initLibrary, renderLibrary } from './library';
-import { startSession, stopSession, sessionActive, getPeers } from './session';
+import { startSession, stopSession, sessionActive, getPeers, pauseSessionUpdates } from './session';
 import { loadPresets, loadColumns } from './persistence';
 import { initColumns, renderColumns } from './columns';
 import { initLayers, renderLayers, exportLayerState, importLayerState } from './layers';
@@ -38,6 +38,7 @@ import { initNudges } from './nudge';
 import { initWonder } from './fx/wonder';
 import { prepareFiles, ACCEPT } from './inputs';
 import { formatLength, DISPLAY_UNITS, unitLabel } from '../engine/units';
+import { openProjectText, type ProjectFile } from './project-file';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -85,55 +86,53 @@ setStatusHint((text) => {
 // --- file opening ---
 
 async function openBytes(bytes: Uint8Array, name: string, notes: string[] = []): Promise<void> {
-  exitCompare();
-  stopSession(); // a new drawing starts a fresh channel
   $('loading').classList.remove('hidden');
+  let previousLayers: ReturnType<typeof exportLayerState> | undefined;
+  let resumeSession: ((committed?: boolean) => void) | null = null;
+  let restored = 0;
+  let restoreKind = 'pdf';
   try {
-    await loadPdf(bytes, name);
+    await loadPdf(bytes, name, { lifecycle: {
+      captureRollback: () => { previousLayers = exportLayerState(); resumeSession = pauseSessionUpdates(); },
+      initialize: async () => {
+        importLayerState(undefined);
+        restored = await importMarkups();
+        if (!restored) { restored = await restoreSession(bytes); restoreKind = 'session'; }
+      },
+      prepareOverlay: () => { renderMarkups(); },
+      beforeCommit: () => {
+        state.tool = restored ? 'pan' : 'calibrate';
+        $('toolHint').textContent = [
+          restored ? (restoreKind === 'pdf'
+            ? 'Restored ' + restored + ' markups from this PDF; calibrate the scale to see values'
+            : 'Restored your last session: ' + restored + ' measurements, scale included')
+            : 'Calibrate the scale to start measuring (press C)',
+          ...notes,
+        ].join(' ');
+      },
+      rollback: () => {
+        try { importLayerState(previousLayers); renderMarkups(); }
+        finally { resumeSession?.(false); resumeSession = null; }
+      },
+      finalize: () => {
+        resumeSession?.(true); resumeSession = null;
+        exitCompare();
+        stopSession();
+      },
+      onCleanupError: (errors) => { $('toolHint').textContent = 'Drawing opened, but previous-document cleanup reported: ' + errors.map(String).join('; '); },
+    } });
     window.scrollTo(0, 0);
     dropzone.classList.add('hidden');
-    let restored = await importMarkups();
-    let restoreKind = 'pdf';
-    if (!restored) {
-      restored = await restoreSession(bytes);
-      restoreKind = 'session';
-    }
-    await renderPage();
-    renderMarkups();
-    setTool(restored ? 'pan' : 'calibrate');
-    $('toolHint').textContent = [
-      restored
-        ? restoreKind === 'pdf'
-          ? `Restored ${restored} markups from this PDF; calibrate the scale to see values`
-          : `Restored your last session: ${restored} measurements, scale included`
-        : 'Calibrate the scale to start measuring (press C)',
-      ...notes,
-    ].join(' ');
+    emit();
   } catch (err) {
-    $('toolHint').textContent = `Could not open this file: ${err instanceof Error ? err.message : String(err)}`;
+    const message = 'Could not open this file: ' + (err instanceof Error ? err.message : String(err));
+    $('toolHint').textContent = message;
+    throw err;
   } finally {
     $('loading').classList.add('hidden');
     emit();
   }
 }
-
-
-type ProjectFile = {
-  format: 'pdf2takeoff-project';
-  version: 1;
-  name: string;
-  drawing: string;
-  pageNum: number;
-  displayUnit: typeof state.displayUnit;
-  markups: typeof state.markups;
-  calibrations: [number, import('../engine/types').Calibration][];
-  viewports: typeof state.viewports;
-  presets: typeof state.presets;
-  columns: typeof state.columns;
-  template: string | null;
-  layerState?: ReturnType<typeof exportLayerState>;
-};
-
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
   const chunk = 0x8000;
@@ -168,38 +167,65 @@ function saveProject(): void {
   $('toolHint').textContent = 'Project saved. Keep the .p2t file to reopen the drawing and its take-off.';
 }
 async function openProject(file: File): Promise<void> {
-  const project = JSON.parse(await file.text()) as ProjectFile;
-  if (project.format !== 'pdf2takeoff-project' || project.version !== 1 || typeof project.drawing !== 'string') {
-    throw new Error('This is not a supported pdf2takeoff project file.');
+  $('loading').classList.remove('hidden');
+  let previousLayers: ReturnType<typeof exportLayerState> | undefined;
+  let resumeSession: ((committed?: boolean) => void) | null = null;
+  try {
+    const text = await file.text();
+    await openProjectText(text, {
+      loadDrawing: async (bytes, name, pageNum, projectLifecycle) => {
+        await loadPdf(bytes, name, { pageNum, lifecycle: {
+          captureRollback: () => { previousLayers = exportLayerState(); resumeSession = pauseSessionUpdates(); },
+          validatePageCount: projectLifecycle.validatePageCount,
+          initialize: projectLifecycle.initialize,
+          prepareOverlay: () => { renderMarkups(); renderColumns(); renderLibrary(); renderLayers(); },
+          beforeCommit: projectLifecycle.beforeCommit,
+          rollback: () => {
+            try { importLayerState(previousLayers); renderMarkups(); renderColumns(); renderLibrary(); }
+            finally { resumeSession?.(false); resumeSession = null; }
+          },
+          finalize: () => {
+            resumeSession?.(true); resumeSession = null;
+            exitCompare();
+            stopSession();
+          },
+          onCleanupError: (errors) => { $('toolHint').textContent = 'Project opened, but previous-document cleanup reported: ' + errors.map(String).join('; '); },
+        } });
+      },
+      applyProject: (project, pageNum) => {
+        state.markups = structuredClone(project.markups ?? []);
+        state.calibrations = new Map(structuredClone(project.calibrations ?? []));
+        state.viewports = structuredClone(project.viewports ?? []);
+        for (const markup of state.markups) freezeMarkupCalibration(markup);
+        state.presets = structuredClone(project.presets ?? []);
+        state.columns = structuredClone(project.columns ?? []);
+        state.template = project.template ?? null;
+        state.displayUnit = project.displayUnit ?? 'm';
+        state.pageNum = pageNum;
+        state.selectedId = null;
+        state.lastAction = null;
+        state.activePreset = null;
+        state.focusLabel = null;
+        state.tool = 'pan';
+        importLayerState(project.layerState);
+      },
+      notifyOpened: (name) => { $('toolHint').textContent = 'Opened project: ' + name; },
+    });
+    setTool('pan');
+    window.scrollTo(0, 0);
+    dropzone.classList.add('hidden');
+    emit();
+  } finally {
+    $('loading').classList.add('hidden');
+    emit();
   }
-  const bytes = base64ToBytes(project.drawing);
-  await openBytes(bytes, project.name || 'project.pdf');
-  state.markups = Array.isArray(project.markups) ? project.markups : [];
-  state.calibrations = new Map(Array.isArray(project.calibrations) ? project.calibrations : []);
-  state.viewports = Array.isArray(project.viewports) ? project.viewports : [];
-  // Older .p2t projects did not freeze each measurement's calibration. Freeze
-  // their then-current page/viewport scale once on load; future scale edits are non-retroactive.
-  for (const markup of state.markups) freezeMarkupCalibration(markup);
-  state.presets = Array.isArray(project.presets) ? project.presets : [];
-  state.columns = Array.isArray(project.columns) ? project.columns : [];
-  state.template = project.template ?? null;
-  importLayerState(project.layerState);
-  state.displayUnit = project.displayUnit || 'm';
-  state.pageNum = Math.min(Math.max(1, project.pageNum || 1), state.pageCount);
-  state.selectedId = null;
-  state.lastAction = null;
-  state.activePreset = null;
-  renderMarkups();
-  emit();
-  await renderPage();
-  setTool('pan');
-  $('toolHint').textContent = `Opened project: ${state.fileName}`;
 }
+
 async function closeProject(): Promise<void> {
   if (!hasDoc()) return;
   if (!window.confirm('Close this project? Save it first if you want to keep your latest changes.')) return;
-  stopSession();
   await closePdf();
+  stopSession();
   state.fileName = '';
   state.fileBytes = null;
   state.pageCount = 0;
