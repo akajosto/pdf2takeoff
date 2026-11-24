@@ -36,6 +36,30 @@ assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, drawing:
 assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, drawing: Buffer.from('not a PDF').toString('base64') })), /does not contain a PDF/);
 assert.throws(() => validateProjectPageReferences({ ...decoded.project, pageNum: 2 }, 1), /refers to page 2/);
 assert.throws(() => validateProjectPageReferences({ ...decoded.project, annotations: [{ ...annotation, page: 2 }] }, 1), /refers to page 2/);
+assert.throws(() => validateProjectPageReferences({ ...decoded.project, markups: [{ ...markup, page: 2 }] }, 1), /refers to page 2/);
+assert.throws(() => validateProjectPageReferences({ ...decoded.project, calibrations: [[2, { metersPerPt: 0.01, source: 'test' }]] }, 1), /refers to page 2/);
+assert.throws(() => validateProjectPageReferences({ ...decoded.project, viewports: [{ id: 'v1', page: 2, points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }], metersPerPt: 0.01, source: 'test' }] }, 1), /refers to page 2/);
+{
+  let applied = false;
+  await assert.rejects(() => openProjectText(JSON.stringify({ ...validProject, pageNum: 2 }), {
+    loadDrawing: async (_bytes, _name, _page, lifecycle) => {
+      lifecycle.validatePageCount(1);
+      await lifecycle.initialize();
+    },
+    applyProject: () => { applied = true; },
+    notifyOpened: () => undefined,
+  }), /refers to page 2/);
+  assert.equal(applied, false);
+}
+{
+  let drawingLoaded = false;
+  await assert.rejects(() => openProjectText(JSON.stringify({ ...validProject, displayUnit: 'invalid' }), {
+    loadDrawing: async () => { drawingLoaded = true; },
+    applyProject: () => undefined,
+    notifyOpened: () => undefined,
+  }), /invalid display unit/);
+  assert.equal(drawingLoaded, false);
+}
 assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, markups: [{ ...markup, timesing: 0 }] })), /invalid measurements/);
 assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, markups: [{ ...markup, strokeOpacity: 1.1 }] })), /invalid measurements/);
 assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, markups: [{ ...markup, depth: 0 }] })), /invalid measurements/);
