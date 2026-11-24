@@ -27,6 +27,24 @@ interface Peer {
 }
 const peers = new Map<string, Peer>();
 
+let pauseDepth = 0;
+const queuedRemoteUpdates: Uint8Array[] = [];
+
+/** Suspend live-session propagation during a document replacement. */
+export function pauseSessionUpdates(): (committed?: boolean) => void {
+  pauseDepth++;
+  let resumed = false;
+  return (committed = false) => {
+    if (resumed) return;
+    resumed = true;
+    pauseDepth = Math.max(0, pauseDepth - 1);
+    if (pauseDepth !== 0) return;
+    const pending = queuedRemoteUpdates.splice(0);
+    if (committed || !doc) return;
+    for (const update of pending) Y.applyUpdate(doc, update, 'remote');
+  };
+}
+
 export function sessionActive(): boolean {
   return doc !== null;
 }
@@ -78,7 +96,7 @@ function rebuildFromDoc(): void {
 
 export function syncUpsertMarkup(m: Markup): void {
   const d = doc;
-  if (!d) return;
+  if (!d || pauseDepth > 0) return;
   // Preserve the complete markup payload, including QS attributes, links,
   // colours, visibility and inventory metadata, across live-session sync.
   const value: Markup = structuredClone(m);
@@ -86,17 +104,17 @@ export function syncUpsertMarkup(m: Markup): void {
 }
 
 export function syncDeleteMarkup(id: string): void {
-  doc?.getMap('markups').delete(id);
+  if (pauseDepth === 0) doc?.getMap('markups').delete(id);
 }
 
 export function syncClearMarkups(): void {
   const d = doc;
-  if (!d) return;
+  if (!d || pauseDepth > 0) return;
   d.transact(() => d.getMap('markups').clear());
 }
 
 export function syncCalibration(page: number, cal: Calibration | null): void {
-  if (!doc) return;
+  if (!doc || pauseDepth > 0) return;
   const map = doc.getMap('calibrations');
   if (cal) map.set(String(page), { metersPerPt: cal.metersPerPt, source: cal.source });
   else map.delete(String(page));
@@ -144,12 +162,13 @@ export function startSession(): void {
       return;
     }
     if (msg.t === 'u' && msg.u instanceof Uint8Array) {
-      Y.applyUpdate(doc, msg.u, 'remote');
+      if (pauseDepth > 0) queuedRemoteUpdates.push(msg.u.slice());
+      else Y.applyUpdate(doc, msg.u, 'remote');
     }
   };
 
   doc.on('update', (update: Uint8Array, origin: unknown) => {
-    if (origin === 'remote') return; // already broadcast by its sender
+    if (origin === 'remote' || pauseDepth > 0) return; // remote updates are already broadcast; replacements are isolated
     post({ t: 'u', from: marker, u: update });
   });
   doc.getMap('markups').observeDeep(() => rebuildFromDoc());
