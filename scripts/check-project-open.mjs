@@ -53,7 +53,7 @@ assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, layerSta
 }
 {
   let cancelled = false;
-  let rejectRender!: (error: Error) => void;
+  let rejectRender;
   const promise = new Promise((_, reject) => { rejectRender = reject; });
   const settled = await cancelAndSettleRenderTask({
     promise,
