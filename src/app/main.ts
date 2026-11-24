@@ -111,6 +111,7 @@ async function openBytes(bytes: Uint8Array, name: string, notes: string[] = []):
             : 'Calibrate the scale to start measuring (press C)',
           ...notes,
         ].join(' ');
+        $('toolHint').textContent = openHint;
       },
       rollback: () => {
         const errors: unknown[] = [];
@@ -227,7 +228,7 @@ async function openProject(file: File): Promise<void> {
         state.tool = 'pan';
         importLayerState(project.layerState);
       },
-      notifyOpened: (name) => { openHint = 'Opened project: ' + name; },
+      notifyOpened: (name) => { openHint = 'Opened project: ' + name; $('toolHint').textContent = openHint; },
     });
     setTool('pan');
     $('toolHint').textContent = openHint + (cleanupWarning ? ' · ' + cleanupWarning : '');

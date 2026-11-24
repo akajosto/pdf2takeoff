@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, stage2-rebuild-transactional-open]
   pull_request:
 
 jobs:
@@ -26,6 +26,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run sample
+      - run: npm run check:project-open
       - run: npm run build
       - run: npm run check:deploy
       - run: npm run cli -- info public/examples/sample-floor-plan.pdf
