@@ -29,6 +29,7 @@ const peers = new Map<string, Peer>();
 
 let pauseDepth = 0;
 const queuedRemoteUpdates: Uint8Array[] = [];
+let pendingPresenceChange = false;
 
 /** Suspend local and remote session propagation while a replacement is reversible. */
 export function pauseSessionUpdates(): (committed?: boolean) => void {
@@ -40,8 +41,11 @@ export function pauseSessionUpdates(): (committed?: boolean) => void {
     pauseDepth = Math.max(0, pauseDepth - 1);
     if (pauseDepth !== 0) return;
     const pending = queuedRemoteUpdates.splice(0);
+    const presenceChanged = pendingPresenceChange;
+    pendingPresenceChange = false;
     if (committed || !doc) return;
     for (const update of pending) Y.applyUpdate(doc, update, 'remote');
+    if (presenceChanged) emit();
   };
 }
 
@@ -153,12 +157,12 @@ export function startSession(): void {
     }
     if (msg.t === 'bye') {
       peers.delete(msg.from!);
-      emit();
+      if (pauseDepth > 0) pendingPresenceChange = true; else emit();
       return;
     }
     if (msg.t === 'p' && msg.from) {
       peers.set(msg.from, { name: msg.p?.name ?? msg.from, page: msg.p?.page ?? 1, at: Date.now() });
-      emit();
+      if (pauseDepth > 0) pendingPresenceChange = true; else emit();
       return;
     }
     if (msg.t === 'u' && msg.u instanceof Uint8Array) {
