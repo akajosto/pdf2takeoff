@@ -30,7 +30,8 @@
     "bench": "node --experimental-strip-types scripts/takeoff-bench.mjs",
     "bench:rooms": "node --experimental-strip-types scripts/room-bench.mjs",
     "bench:ledger": "node --experimental-strip-types scripts/bench-ledger.mjs",
-    "bench:scaled": "node --experimental-strip-types scripts/scaled-drawing-bench.mjs"
+    "bench:scaled": "node --experimental-strip-types scripts/scaled-drawing-bench.mjs",
+    "check:project-open": "node --experimental-strip-types scripts/check-project-open.mjs"
   },
   "keywords": [
     "construction",
