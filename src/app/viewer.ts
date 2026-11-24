@@ -337,6 +337,7 @@ export async function renderPage(options: { strict?: boolean } = {}): Promise<vo
   const page = await currentDoc.getPage(state.pageNum);
   if (mySeq !== renderSeq || doc !== currentDoc) return;
   viewport1 = page.getViewport({ scale: 1 });
+  if (state.fit === 'width') state.zoom = fitWidthZoom();
   svg.setAttribute('viewBox', '0 0 ' + viewport1.width + ' ' + viewport1.height);
   applyLayoutSize();
   await paintCanvas(page, mySeq, options.strict ?? false);
@@ -349,11 +350,13 @@ function fitWidthZoom(): number {
 
 export function fitWidth(): void {
   if (!viewport1) return;
+  state.fit = 'width';
   state.zoom = fitWidthZoom();
   emit();
 }
 
 export function setZoom(z: number): void {
+  state.fit = null;
   state.zoom = clampZoom(z);
   emit();
 }
@@ -374,6 +377,7 @@ export function zoomAt(clientX: number, clientY: number, factor: number): void {
   const pointerY = clientY - scrollRect.top;
   const pageX = localX / z1;
   const pageY = localY / z1;
+  state.fit = null;
   state.zoom = z2;
   previewResize();
 

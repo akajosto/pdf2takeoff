@@ -91,6 +91,8 @@ async function openBytes(bytes: Uint8Array, name: string, notes: string[] = []):
   let resumeSession: ((committed?: boolean) => void) | null = null;
   let restored = 0;
   let restoreKind = 'pdf';
+  let openHint = '';
+  let cleanupWarning = '';
   try {
     await loadPdf(bytes, name, { lifecycle: {
       captureRollback: () => { previousLayers = exportLayerState(); resumeSession = pauseSessionUpdates(); },
@@ -102,7 +104,7 @@ async function openBytes(bytes: Uint8Array, name: string, notes: string[] = []):
       prepareOverlay: () => { renderMarkups(); },
       beforeCommit: () => {
         state.tool = restored ? 'pan' : 'calibrate';
-        $('toolHint').textContent = [
+        openHint = [
           restored ? (restoreKind === 'pdf'
             ? 'Restored ' + restored + ' markups from this PDF; calibrate the scale to see values'
             : 'Restored your last session: ' + restored + ' measurements, scale included')
@@ -127,9 +129,10 @@ async function openBytes(bytes: Uint8Array, name: string, notes: string[] = []):
         }
         if (errors.length) throw new AggregateError(errors, 'PDF-open finalization had cleanup errors.');
       },
-      onCleanupError: (errors) => { $('toolHint').textContent = 'Drawing opened, but previous-document cleanup reported: ' + errors.map(String).join('; '); },
+      onCleanupError: (errors) => { cleanupWarning = 'Previous-document cleanup reported: ' + errors.map(String).join('; '); },
     } });
     setTool(restored ? 'pan' : 'calibrate');
+    $('toolHint').textContent = openHint + (cleanupWarning ? ' · ' + cleanupWarning : '');
     window.scrollTo(0, 0);
     dropzone.classList.add('hidden');
     emit();
@@ -173,6 +176,8 @@ async function openProject(file: File): Promise<void> {
   $('loading').classList.remove('hidden');
   let previousLayers: ReturnType<typeof exportLayerState> | undefined;
   let resumeSession: ((committed?: boolean) => void) | null = null;
+  let openHint = '';
+  let cleanupWarning = '';
   try {
     const text = await file.text();
     await openProjectText(text, {
@@ -202,7 +207,7 @@ async function openProject(file: File): Promise<void> {
             }
             if (errors.length) throw new AggregateError(errors, 'Project-open finalization had cleanup errors.');
           },
-          onCleanupError: (errors) => { $('toolHint').textContent = 'Project opened, but previous-document cleanup reported: ' + errors.map(String).join('; '); },
+          onCleanupError: (errors) => { cleanupWarning = 'Previous-document cleanup reported: ' + errors.map(String).join('; '); },
         } });
       },
       applyProject: (project, pageNum) => {
@@ -222,9 +227,10 @@ async function openProject(file: File): Promise<void> {
         state.tool = 'pan';
         importLayerState(project.layerState);
       },
-      notifyOpened: (name) => { $('toolHint').textContent = 'Opened project: ' + name; },
+      notifyOpened: (name) => { openHint = 'Opened project: ' + name; },
     });
     setTool('pan');
+    $('toolHint').textContent = openHint + (cleanupWarning ? ' · ' + cleanupWarning : '');
     window.scrollTo(0, 0);
     dropzone.classList.add('hidden');
     emit();
@@ -239,6 +245,7 @@ async function closeProject(): Promise<void> {
   if (!window.confirm('Close this project? Save it first if you want to keep your latest changes.')) return;
   await closePdf();
   stopSession();
+  clearTakeoffHistory();
   state.fileName = '';
   state.fileBytes = null;
   state.pageCount = 0;
