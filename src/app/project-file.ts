@@ -81,11 +81,17 @@ function isMarkup(value: unknown): value is Markup {
       typeof value.label !== 'string' || !isPositivePage(value.page) ||
       typeof value.createdAt !== 'number' || !Number.isFinite(value.createdAt) ||
       !MARKUP_TYPES.includes(value.type as MarkupType) ||
-      !Array.isArray(value.points) || !value.points.every(isPoint)) return false;
+      !Array.isArray(value.points) || value.points.length > 10000 || !value.points.every(isPoint)) return false;
+  const minPoints = value.type === 'length' ? 2 : ['area', 'perimeter', 'volume', 'angle'].includes(String(value.type)) ? 3 : 1;
+  if (value.points.length < minPoints) return false;
   const strings = ['color', 'formula', 'itemCode', 'layer', 'parentId', 'remarks', 'sourceId'];
   const numbers = ['depth', 'fillOpacity', 'strokeOpacity', 'strokeWidth', 'timesing'];
   return strings.every((key) => value[key] === undefined || typeof value[key] === 'string') &&
     numbers.every((key) => value[key] === undefined || (typeof value[key] === 'number' && Number.isFinite(value[key]))) &&
+    (value.depth === undefined || (typeof value.depth === 'number' && value.depth > 0)) &&
+    (value.timesing === undefined || (typeof value.timesing === 'number' && value.timesing > 0)) &&
+    (value.strokeWidth === undefined || (typeof value.strokeWidth === 'number' && value.strokeWidth > 0)) &&
+    ['fillOpacity', 'strokeOpacity'].every((key) => value[key] === undefined || (typeof value[key] === 'number' && value[key] >= 0 && value[key] <= 1)) &&
     (value.calibration === undefined || isCalibration(value.calibration)) &&
     (value.item === undefined || isItemAttrs(value.item)) &&
     (value.links === undefined || (Array.isArray(value.links) && value.links.every((link) =>
@@ -99,10 +105,12 @@ function isMarkup(value: unknown): value is Markup {
 }
 function isAnnotation(value: unknown): value is DrawingAnnotation {
   return isRecord(value) && typeof value.id === 'string' && !!value.id && isPositivePage(value.page) &&
-    ANNOTATION_KINDS.includes(String(value.kind)) && Array.isArray(value.points) && value.points.every(isPoint) &&
+    ANNOTATION_KINDS.includes(String(value.kind)) && Array.isArray(value.points) && value.points.length <= 10000 && value.points.every(isPoint) &&
+    value.points.length >= (['line', 'arrow', 'rectangle', 'ellipse', 'highlight'].includes(String(value.kind)) ? 2 : String(value.kind) === 'cloud' ? 3 : 1) &&
     ['color', 'text'].every((key) => value[key] === undefined || typeof value[key] === 'string') &&
-    ['strokeWidth', 'opacity', 'fillOpacity'].every((key) => value[key] === undefined ||
-      (typeof value[key] === 'number' && Number.isFinite(value[key]))) &&
+    (value.strokeWidth === undefined || (typeof value.strokeWidth === 'number' && Number.isFinite(value.strokeWidth) && value.strokeWidth > 0)) &&
+    ['opacity', 'fillOpacity'].every((key) => value[key] === undefined ||
+      (typeof value[key] === 'number' && Number.isFinite(value[key]) && value[key] >= 0 && value[key] <= 1)) &&
     (value.lineStyle === undefined || ['solid', 'dashed', 'dotted'].includes(String(value.lineStyle)));
 }
 function isViewport(value: unknown): value is Viewport {
@@ -125,9 +133,9 @@ function validateProject(project: Record<string, unknown>): asserts project is P
       new Set(project.calibrations.map((entry) => entry[0])).size !== project.calibrations.length)) invalidField('calibrations');
   if (project.viewports !== undefined && (!Array.isArray(project.viewports) || !project.viewports.every(isViewport))) invalidField('viewports');
   if (project.presets !== undefined && (!Array.isArray(project.presets) ||
-      !project.presets.every((p) => isRecord(p) && MARKUP_TYPES.includes(p.type as MarkupType) && typeof p.label === 'string'))) invalidField('presets');
+      !project.presets.every((p) => isRecord(p) && MARKUP_TYPES.includes(p.type as MarkupType) && typeof p.label === 'string' && !!p.label.trim()))) invalidField('presets');
   if (project.columns !== undefined && (!Array.isArray(project.columns) ||
-      !project.columns.every((c) => isRecord(c) && typeof c.name === 'string' && typeof c.formula === 'string' && typeof c.unit === 'string'))) invalidField('quantity columns');
+      !project.columns.every((c) => isRecord(c) && typeof c.name === 'string' && !!c.name.trim() && typeof c.formula === 'string' && typeof c.unit === 'string'))) invalidField('quantity columns');
   if (project.template !== undefined && project.template !== null && typeof project.template !== 'string') invalidField('template');
   if (project.layerState !== undefined) {
     const layer = project.layerState;
