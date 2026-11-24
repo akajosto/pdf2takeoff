@@ -5,7 +5,7 @@ import {
   loadValidatedPdfCandidate,
   openPdfTask,
 } from '../src/app/pdf-candidate.ts';
-import { decodeProjectFile, validateProjectPageReferences } from '../src/app/project-file.ts';
+import { decodeProjectFile, openProjectText, validateProjectPageReferences } from '../src/app/project-file.ts';
 
 const pdfBytes = Buffer.from('%PDF-1.7\nminimal fixture').toString('base64');
 const markup = { id: 'm1', page: 1, type: 'count', label: 'Door', points: [{ x: 1, y: 2 }], createdAt: 1 };
@@ -36,6 +36,41 @@ assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, drawing:
 assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, drawing: Buffer.from('not a PDF').toString('base64') })), /does not contain a PDF/);
 assert.throws(() => validateProjectPageReferences({ ...decoded.project, pageNum: 2 }, 1), /refers to page 2/);
 assert.throws(() => validateProjectPageReferences({ ...decoded.project, annotations: [{ ...annotation, page: 2 }] }, 1), /refers to page 2/);
+assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, markups: [{ ...markup, timesing: 0 }] })), /invalid measurements/);
+assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, markups: [{ ...markup, strokeOpacity: 1.1 }] })), /invalid measurements/);
+assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, markups: [{ ...markup, depth: 0 }] })), /invalid measurements/);
+assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, annotations: [{ ...annotation, opacity: -0.1 }] })), /invalid annotations/);
+assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, annotations: [{ ...annotation, strokeWidth: 0 }] })), /invalid annotations/);
+assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, calibrations: [[1, { metersPerPt: 0, source: 'bad' }]] })), /invalid calibrations/);
+assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, viewports: [{ id: 'v1', page: 1, points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }], metersPerPt: 0, source: 'bad' }] })), /invalid viewports/);
+assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, columns: [{ name: '  ', formula: 'value', unit: 'm' }] })), /invalid quantity columns/);
+
+{
+  const order = [];
+  await openProjectText(JSON.stringify(validProject), {
+    loadDrawing: async (_bytes, _name, _page, lifecycle) => {
+      order.push('load');
+      lifecycle.validatePageCount(1);
+      await lifecycle.initialize();
+      order.push('drawing-ready');
+      await lifecycle.beforeCommit?.();
+      order.push('committed');
+    },
+    applyProject: () => { order.push('apply-project'); },
+    notifyOpened: () => { order.push('notify-opened'); },
+  });
+  assert.deepEqual(order, ['load', 'apply-project', 'drawing-ready', 'notify-opened', 'committed']);
+}
+{
+  await assert.rejects(() => openProjectText(JSON.stringify(validProject), {
+    loadDrawing: async (_bytes, _name, _page, lifecycle) => {
+      await lifecycle.initialize();
+      await lifecycle.beforeCommit?.();
+    },
+    applyProject: () => undefined,
+    notifyOpened: () => { throw new Error('commit notification failed'); },
+  }), /commit notification failed/);
+}
 assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, markups: [markup, markup] })), /duplicate ids/);
 assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, annotations: [annotation, annotation] })), /duplicate ids/);
 const cyclicA = { ...markup, id: 'a', parentId: 'b' };
