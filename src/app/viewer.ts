@@ -117,6 +117,7 @@ export async function loadPdf(bytes: Uint8Array, name: string, options: PdfLoadO
   const lifecycle = options.lifecycle ?? {};
   const requestedPage = options.pageNum ?? 1;
   try {
+    lockWorkspace();
     const result = await loadValidatedPdfCandidate(
       async () => openPdfTask(pdfjsLib.getDocument({ data: bytes.slice(), ...PDFJS_ASSET_URLS })),
       async (candidate) => {
@@ -182,7 +183,6 @@ export async function loadPdf(bytes: Uint8Array, name: string, options: PdfLoadO
             } catch (error) { errors.push(error); }
             try { await lifecycle.rollback?.(); } catch (error) { errors.push(error); }
             const candidateDetached = doc !== candidate;
-            try { unlockWorkspace(); } catch (error) { errors.push(error); }
             try { emit(); } catch (error) { errors.push(error); }
             return { candidateDetached, rollbackComplete: errors.length === 0, errors };
           },
@@ -195,16 +195,10 @@ export async function loadPdf(bytes: Uint8Array, name: string, options: PdfLoadO
             if (errors.length) throw new AggregateError(errors, 'PDF replacement committed, but cleanup reported errors.');
           },
         };
-        try { lockWorkspace(); }
-        catch (error) {
-          try { unlockWorkspace(); } catch (unlockError) { throw new AggregateError([error, unlockError], 'Could not lock the PDF workspace.'); }
-          throw error;
-        }
         try { lifecycle.captureRollback?.(); }
         catch (error) {
           const errors: unknown[] = [error];
           try { await lifecycle.rollback?.(); } catch (rollbackError) { errors.push(rollbackError); }
-          try { unlockWorkspace(); } catch (unlockError) { errors.push(unlockError); }
           throw errors.length === 1 ? error : new AggregateError(errors, 'Could not capture replacement rollback state.');
         }
         // No fallible work remains after ownership is switched to the candidate.
@@ -232,8 +226,8 @@ export async function loadPdf(bytes: Uint8Array, name: string, options: PdfLoadO
       } catch (reportError) { console.error('Could not report PDF replacement cleanup errors:', reportError); }
     }
   } finally {
-    replacementInProgress = false;
     if (scrollEl.classList.contains('pdf-replacing')) { try { unlockWorkspace(); } catch (error) { console.error('Could not unlock PDF workspace:', error); } }
+    replacementInProgress = false;
   }
 }
 export async function closePdf(): Promise<void> {
