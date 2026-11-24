@@ -142,7 +142,7 @@ export async function loadPdf(bytes: Uint8Array, name: string, options: PdfLoadO
         await awaitPdfRenderTask(page.render({ canvas: preview, canvasContext: context, viewport: previewViewport }), () => { preview.width = 0; preview.height = 0; });
         return { pageCount: candidate.numPages, imagePages, calibrations };
       },
-      (candidate, prepared) => {
+      async (candidate, prepared) => {
         const previousDoc = doc;
         const previousViewport = viewport1;
         const previousState = structuredClone(state);
@@ -158,16 +158,10 @@ export async function loadPdf(bytes: Uint8Array, name: string, options: PdfLoadO
         }
         const previousSvg = { viewBox: svg.getAttribute('viewBox'), width: svg.getAttribute('width'), height: svg.getAttribute('height') };
         const previousFirstRender = onFirstRender;
-        lifecycle.captureRollback?.();
-        lockWorkspace();
-        doc = candidate; viewport1 = null;
-        state.fileName = name; state.fileBytes = bytes.slice(); state.pageCount = prepared.pageCount; state.pageNum = requestedPage;
-        state.markups = []; state.annotations = []; state.selectedAnnotationId = null;
-        state.selectedId = null; state.calibrations = new Map(prepared.calibrations);
-        state.imagePages = new Map(prepared.imagePages); state.scaleChecks = new Map(); state.viewports = [];
-        state.focusLabel = null; state.lastAction = null; state.activePreset = null;
-        state.zoom = 1; state.fit = 'width';
-        return {
+        const candidateBytes = bytes.slice();
+        const candidateCalibrations = new Map(prepared.calibrations);
+        const candidateImagePages = new Map(prepared.imagePages);
+        const transaction = {
           rollback: async () => {
             const errors: unknown[] = await cancelActiveRender();
             renderSeq++; doc = previousDoc; viewport1 = previousViewport; onFirstRender = previousFirstRender;
@@ -201,6 +195,27 @@ export async function loadPdf(bytes: Uint8Array, name: string, options: PdfLoadO
             if (errors.length) throw new AggregateError(errors, 'PDF replacement committed, but cleanup reported errors.');
           },
         };
+        try { lockWorkspace(); }
+        catch (error) {
+          try { unlockWorkspace(); } catch (unlockError) { throw new AggregateError([error, unlockError], 'Could not lock the PDF workspace.'); }
+          throw error;
+        }
+        try { lifecycle.captureRollback?.(); }
+        catch (error) {
+          const errors: unknown[] = [error];
+          try { await lifecycle.rollback?.(); } catch (rollbackError) { errors.push(rollbackError); }
+          try { unlockWorkspace(); } catch (unlockError) { errors.push(unlockError); }
+          throw errors.length === 1 ? error : new AggregateError(errors, 'Could not capture replacement rollback state.');
+        }
+        // No fallible work remains after ownership is switched to the candidate.
+        state.fileName = name; state.fileBytes = candidateBytes; state.pageCount = prepared.pageCount; state.pageNum = requestedPage;
+        state.markups = []; state.annotations = []; state.selectedAnnotationId = null;
+        state.selectedId = null; state.calibrations = candidateCalibrations;
+        state.imagePages = candidateImagePages; state.scaleChecks = new Map(); state.viewports = [];
+        state.focusLabel = null; state.lastAction = null; state.activePreset = null;
+        state.zoom = 1; state.fit = 'width';
+        doc = candidate; viewport1 = null;
+        return transaction;
       },
       async () => {
         await lifecycle.initialize?.();
