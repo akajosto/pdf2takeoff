@@ -129,6 +129,40 @@ assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, layerSta
   await assert.rejects(() => loadValidatedPdfCandidate(
     async () => ({ id: 'candidate' }),
     async () => 'prepared',
+    () => { throw new Error('activation failed before ownership transfer'); },
+    async () => undefined,
+    async () => { disposed = true; },
+  ), /activation failed before ownership transfer/);
+  assert.equal(disposed, true);
+}
+{
+  let disposed = false;
+  await assert.rejects(() => loadValidatedPdfCandidate(
+    async () => ({ id: 'candidate' }),
+    async () => 'prepared',
+    () => ({
+      rollback: async () => ({ candidateDetached: true, rollbackComplete: false, errors: [new Error('visual restore failed')] }),
+      finalize: async () => undefined,
+    }),
+    async () => { throw new Error('first paint failed'); },
+    async () => { disposed = true; },
+  ), (error) => error instanceof AggregateError &&
+    error.errors.some((item) => String(item).includes('visual restore failed')) &&
+    error.errors.some((item) => String(item).includes('rollback was incomplete')));
+  assert.equal(disposed, true);
+}
+{
+  await assert.rejects(() => openPdfTask({
+    promise: Promise.reject(new Error('load failed')),
+    destroy: async () => { throw new Error('loading task destroy failed'); },
+  }), (error) => error instanceof AggregateError && error.errors.length === 2);
+}
+
+{
+  let disposed = false;
+  await assert.rejects(() => loadValidatedPdfCandidate(
+    async () => ({ id: 'candidate' }),
+    async () => 'prepared',
     () => ({
       rollback: async () => ({ candidateDetached: false, rollbackComplete: false, errors: [new Error('rollback failed')] }),
       finalize: async () => undefined,
