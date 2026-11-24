@@ -101,8 +101,17 @@ let replacementInProgress = false;
 let workspaceWasInert = false;
 export function isPdfReplacementInProgress(): boolean { return replacementInProgress; }
 function lockWorkspace(): void {
-  workspaceWasInert = scrollEl.inert; scrollEl.inert = true;
-  scrollEl.setAttribute('aria-busy', 'true'); scrollEl.classList.add('pdf-replacing');
+  workspaceWasInert = scrollEl.inert;
+  try {
+    scrollEl.inert = true;
+    scrollEl.setAttribute('aria-busy', 'true');
+    scrollEl.classList.add('pdf-replacing');
+  } catch (error) {
+    scrollEl.inert = workspaceWasInert;
+    scrollEl.removeAttribute('aria-busy');
+    scrollEl.classList.remove('pdf-replacing');
+    throw error;
+  }
 }
 function unlockWorkspace(): void {
   scrollEl.inert = workspaceWasInert; scrollEl.removeAttribute('aria-busy'); scrollEl.classList.remove('pdf-replacing');
@@ -189,8 +198,7 @@ export async function loadPdf(bytes: Uint8Array, name: string, options: PdfLoadO
           finalize: async () => {
             const errors: unknown[] = [];
             try { await lifecycle.finalize?.(); } catch (error) { errors.push(error); }
-            if (previousDoc) { try { await previousDoc.destroy(); } catch (error) { errors.push(error); } }
-            try { unlockWorkspace(); } catch (error) { errors.push(error); }
+            if (previousDoc) { try { await previousDoc.destroy(); } catch (error) { errors.push(error); }
             try { emit(); } catch (error) { errors.push(error); }
             if (errors.length) throw new AggregateError(errors, 'PDF replacement committed, but cleanup reported errors.');
           },
