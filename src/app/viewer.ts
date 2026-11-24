@@ -188,14 +188,16 @@ export async function loadPdf(bytes: Uint8Array, name: string, options: PdfLoadO
             } catch (error) { errors.push(error); }
             try { await lifecycle.rollback?.(); } catch (error) { errors.push(error); }
             const candidateDetached = doc !== candidate;
-            unlockWorkspace(); emit();
+            try { unlockWorkspace(); } catch (error) { errors.push(error); }
+            try { emit(); } catch (error) { errors.push(error); }
             return { candidateDetached, rollbackComplete: errors.length === 0, errors };
           },
           finalize: async () => {
             const errors: unknown[] = [];
             try { await lifecycle.finalize?.(); } catch (error) { errors.push(error); }
             if (previousDoc) { try { await previousDoc.destroy(); } catch (error) { errors.push(error); } }
-            unlockWorkspace(); emit();
+            try { unlockWorkspace(); } catch (error) { errors.push(error); }
+            try { emit(); } catch (error) { errors.push(error); }
             if (errors.length) throw new AggregateError(errors, 'PDF replacement committed, but cleanup reported errors.');
           },
         };
@@ -209,12 +211,14 @@ export async function loadPdf(bytes: Uint8Array, name: string, options: PdfLoadO
       async (candidate) => { await candidate.destroy(); },
     );
     if (result.cleanupErrors.length) {
-      if (lifecycle.onCleanupError) lifecycle.onCleanupError(result.cleanupErrors);
-      else console.error('PDF replacement cleanup errors:', result.cleanupErrors);
+      try {
+        if (lifecycle.onCleanupError) lifecycle.onCleanupError(result.cleanupErrors);
+        else console.error('PDF replacement cleanup errors:', result.cleanupErrors);
+      } catch (reportError) { console.error('Could not report PDF replacement cleanup errors:', reportError); }
     }
   } finally {
     replacementInProgress = false;
-    if (scrollEl.classList.contains('pdf-replacing')) unlockWorkspace();
+    if (scrollEl.classList.contains('pdf-replacing')) { try { unlockWorkspace(); } catch (error) { console.error('Could not unlock PDF workspace:', error); } }
   }
 }
 export async function closePdf(): Promise<void> {
