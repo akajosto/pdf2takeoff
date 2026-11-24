@@ -336,9 +336,15 @@ projectInput.addEventListener('change', () => {
 });
 
 export async function openSample(): Promise<void> {
-  const resp = await fetch('examples/sample-floor-plan.pdf');
-  const buf = await resp.arrayBuffer();
-  await openBytes(new Uint8Array(buf), 'sample-floor-plan.pdf');
+  try {
+    const resp = await fetch('examples/sample-floor-plan.pdf');
+    if (!resp.ok) throw new Error('Sample drawing request failed: ' + resp.status);
+    const buf = await resp.arrayBuffer();
+    await openBytes(new Uint8Array(buf), 'sample-floor-plan.pdf');
+  } catch (error) {
+    $('toolHint').textContent = 'Could not open the sample drawing: ' + (error instanceof Error ? error.message : String(error));
+    showMessage($('toolHint').textContent);
+  }
 }
 
 // ?file=/path.pdf — open a same-origin drawing on load (deep links, tests).

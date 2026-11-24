@@ -53,10 +53,12 @@ assert.throws(() => decodeProjectFile(JSON.stringify({ ...validProject, layerSta
 }
 {
   let cancelled = false;
-  const promise = new Promise((_, reject) => {
-    setTimeout(() => reject(Object.assign(new Error('cancelled'), { name: 'RenderingCancelledException' })), 0);
+  let rejectRender!: (error: Error) => void;
+  const promise = new Promise((_, reject) => { rejectRender = reject; });
+  const settled = await cancelAndSettleRenderTask({
+    promise,
+    cancel: () => { cancelled = true; rejectRender(Object.assign(new Error('cancelled'), { name: 'RenderingCancelledException' })); },
   });
-  const settled = await cancelAndSettleRenderTask({ promise, cancel: () => { cancelled = true; } });
   assert.equal(cancelled, true);
   assert.deepEqual(settled, []);
 }
