@@ -67,14 +67,13 @@ export async function cancelAndSettleRenderTask(task: PdfRenderTask | null): Pro
   const errors: unknown[] = [];
   try {
     task.cancel();
-  } catch (error) {
-    // PDF.js may report that the task has already completed.
-    errors.push(error);
+  } catch {
+    // A task that has just completed may reject cancellation; its promise below
+    // is the authoritative indication that PDF.js has released its resources.
   }
   try {
     await task.promise;
   } catch (error) {
-    // This rejection is the normal completion signal for a cancelled render.
     if (errorName(error) !== 'RenderingCancelledException' && errorName(error) !== 'AbortException') {
       errors.push(error);
     }

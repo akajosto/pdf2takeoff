@@ -71,6 +71,12 @@ export function initViewer(
   svg = overlay;
   markupsLayer = ml;
   previewLayer = pl;
+  window.addEventListener('keydown', (event) => {
+    if (replacementInProgress) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }, true);
+  document.addEventListener('click', (event) => {
+    if (replacementInProgress) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }, true);
   bindWheel();
   bindPan();
 }
@@ -129,7 +135,7 @@ export async function loadPdf(bytes: Uint8Array, name: string, options: PdfLoadO
         const metadata = await candidate.getMetadata().catch(() => null);
         const custom = (metadata?.info as { Custom?: Record<string, unknown> } | undefined)?.Custom;
         const imagePages = parseImagePages(custom?.[PAPER_KEY]);
-        const calibrations = parseScales(custom?.[SCALE_KEY]).map(([page, scale]) => [page, {
+        const calibrations = [...parseScales(custom?.[SCALE_KEY]).entries()].map(([page, scale]) => [page, {
           metersPerPt: METERS_PER_PT * scale.ratio,
           source: 'drawing units (' + scale.unit + (scale.assumed ? ', assumed' : '') + ') at 1:' + scale.ratio,
         }] as const);
@@ -160,6 +166,7 @@ export async function loadPdf(bytes: Uint8Array, name: string, options: PdfLoadO
           copyContext.drawImage(canvas, 0, 0);
         }
         const previousSvg = { viewBox: svg.getAttribute('viewBox'), width: svg.getAttribute('width'), height: svg.getAttribute('height') };
+        const previousFirstRender = onFirstRender;
         lifecycle.captureRollback?.();
         lockWorkspace();
         doc = candidate; viewport1 = null;
@@ -170,7 +177,7 @@ export async function loadPdf(bytes: Uint8Array, name: string, options: PdfLoadO
         return {
           rollback: async () => {
             const errors: unknown[] = await cancelActiveRender();
-            renderSeq++; doc = previousDoc; viewport1 = previousViewport;
+            renderSeq++; doc = previousDoc; viewport1 = previousViewport; onFirstRender = previousFirstRender;
             try {
               Object.assign(state, previousState);
               pageEl.style.width = previousPageStyle.width; pageEl.style.height = previousPageStyle.height;
@@ -471,6 +478,9 @@ function bindWheel(): void {
   window.addEventListener(
     'wheel',
     (e) => {
+      if (replacementInProgress && e.target instanceof Node && scrollEl.contains(e.target)) {
+        e.preventDefault(); e.stopImmediatePropagation(); return;
+      }
       if (!doc || !(e.target instanceof Node) || !scrollEl.contains(e.target)) return;
       e.preventDefault();
       e.stopPropagation();
@@ -492,7 +502,7 @@ function bindWheel(): void {
   // Double-click zoom is navigation-only. Measurement tools retain their
   // existing double-click-to-finish gesture.
   svg.addEventListener('dblclick', (e) => {
-    if (!doc || state.tool !== 'pan') return;
+    if (replacementInProgress || !doc || state.tool !== 'pan') return;
     e.preventDefault();
     e.stopImmediatePropagation();
     zoomAt(e.clientX, e.clientY, 1.5);
@@ -513,7 +523,7 @@ function bindPan(): void {
   });
 
   svg.addEventListener('pointerdown', (e) => {
-    if (!doc) return;
+    if (replacementInProgress || !doc) return;
     const middlePan = e.button === 1;
     const spacePan = e.button === 0 && spaceDown;
     const toolPan = e.button === 0 && state.tool === 'pan';
