@@ -205,7 +205,7 @@ export function decodeProjectFile(text: string): DecodedProject {
   catch (error) { throw new Error(`Project file contains invalid embedded PDF data: ${error instanceof Error ? error.message : String(error)}`); }
   if (!binary.length) throw new Error('Project file is missing its embedded PDF.');
   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  if (bytes.length < 5 || String.fromCharCode(...bytes.subarray(0, 5)) !== '%PDF-') {
+  if (bytes.length < 5 || !String.fromCharCode(...bytes.subarray(0, Math.min(bytes.length, 1024))).includes('%PDF-')) {
     throw new Error('Project file does not contain a PDF document.');
   }
   return { project: value, bytes, name: value.name?.trim() || 'project.pdf', pageNum: value.pageNum ?? 1 };

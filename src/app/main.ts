@@ -4,7 +4,7 @@
 
 import { state, freezeMarkupCalibration, subscribe, emit } from './state';
 import { initViewer, loadPdf, closePdf, renderPage, fitWidth, setZoom, hasDoc, eventToView, viewToPdf, setZoomChangeHandler } from './viewer';
-import { initTools, setTool, setStatusHint } from './tools';
+import { initTools, setTool, setStatusHint, clearTakeoffHistory } from './tools';
 import { initTable, renderTable } from './table';
 import { renderMarkups } from './render';
 import { saveAnnotatedPdf, importMarkups } from './pdfio';
@@ -118,9 +118,11 @@ async function openBytes(bytes: Uint8Array, name: string, notes: string[] = []):
         resumeSession?.(true); resumeSession = null;
         exitCompare();
         stopSession();
+        clearTakeoffHistory();
       },
       onCleanupError: (errors) => { $('toolHint').textContent = 'Drawing opened, but previous-document cleanup reported: ' + errors.map(String).join('; '); },
     } });
+    setTool(restored ? 'pan' : 'calibrate');
     window.scrollTo(0, 0);
     dropzone.classList.add('hidden');
     emit();
@@ -188,6 +190,7 @@ async function openProject(file: File): Promise<void> {
             resumeSession?.(true); resumeSession = null;
             exitCompare();
             stopSession();
+            clearTakeoffHistory();
           },
           onCleanupError: (errors) => { $('toolHint').textContent = 'Project opened, but previous-document cleanup reported: ' + errors.map(String).join('; '); },
         } });

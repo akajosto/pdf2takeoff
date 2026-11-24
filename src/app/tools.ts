@@ -52,6 +52,13 @@ export function recordTakeoffHistory(): void {
   recordHistory();
 }
 
+/** Start a new document with an empty undo/redo history. */
+export function clearTakeoffHistory(): void {
+  undoStack.length = 0;
+  redoStack.length = 0;
+  updateHistoryButtons();
+}
+
 function recordHistory(): void {
   undoStack.push(snapshotTakeoff());
   if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
