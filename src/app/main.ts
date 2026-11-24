@@ -111,14 +111,21 @@ async function openBytes(bytes: Uint8Array, name: string, notes: string[] = []):
         ].join(' ');
       },
       rollback: () => {
-        try { importLayerState(previousLayers); renderMarkups(); }
-        finally { resumeSession?.(false); resumeSession = null; }
+        const errors: unknown[] = [];
+        try { importLayerState(previousLayers); } catch (error) { errors.push(error); }
+        try { renderMarkups(); } catch (error) { errors.push(error); }
+        try { resumeSession?.(false); } catch (error) { errors.push(error); }
+        resumeSession = null;
+        if (errors.length) throw new AggregateError(errors, 'PDF-open application rollback was incomplete.');
       },
       finalize: () => {
-        resumeSession?.(true); resumeSession = null;
-        exitCompare();
-        stopSession();
-        clearTakeoffHistory();
+        const errors: unknown[] = [];
+        try { resumeSession?.(true); } catch (error) { errors.push(error); }
+        resumeSession = null;
+        for (const action of [exitCompare, stopSession, clearTakeoffHistory]) {
+          try { action(); } catch (error) { errors.push(error); }
+        }
+        if (errors.length) throw new AggregateError(errors, 'PDF-open finalization had cleanup errors.');
       },
       onCleanupError: (errors) => { $('toolHint').textContent = 'Drawing opened, but previous-document cleanup reported: ' + errors.map(String).join('; '); },
     } });
@@ -177,14 +184,23 @@ async function openProject(file: File): Promise<void> {
           prepareOverlay: () => { renderMarkups(); renderColumns(); renderLibrary(); renderLayers(); },
           beforeCommit: projectLifecycle.beforeCommit,
           rollback: () => {
-            try { importLayerState(previousLayers); renderMarkups(); renderColumns(); renderLibrary(); }
-            finally { resumeSession?.(false); resumeSession = null; }
+            const errors: unknown[] = [];
+            try { importLayerState(previousLayers); } catch (error) { errors.push(error); }
+            for (const action of [renderMarkups, renderColumns, renderLibrary]) {
+              try { action(); } catch (error) { errors.push(error); }
+            }
+            try { resumeSession?.(false); } catch (error) { errors.push(error); }
+            resumeSession = null;
+            if (errors.length) throw new AggregateError(errors, 'Project-open application rollback was incomplete.');
           },
           finalize: () => {
-            resumeSession?.(true); resumeSession = null;
-            exitCompare();
-            stopSession();
-            clearTakeoffHistory();
+            const errors: unknown[] = [];
+            try { resumeSession?.(true); } catch (error) { errors.push(error); }
+            resumeSession = null;
+            for (const action of [exitCompare, stopSession, clearTakeoffHistory]) {
+              try { action(); } catch (error) { errors.push(error); }
+            }
+            if (errors.length) throw new AggregateError(errors, 'Project-open finalization had cleanup errors.');
           },
           onCleanupError: (errors) => { $('toolHint').textContent = 'Project opened, but previous-document cleanup reported: ' + errors.map(String).join('; '); },
         } });
