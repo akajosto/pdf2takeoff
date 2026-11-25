@@ -3,7 +3,7 @@
 // drop and paste, and calls openFiles / openSample / startDemo here.
 
 import { state, freezeMarkupCalibration, subscribe, emit } from './state';
-import { initViewer, loadPdf, closePdf, renderPage, fitWidth, setZoom, hasDoc, eventToView, viewToPdf, setZoomChangeHandler } from './viewer';
+import { initViewer, loadPdf, closePdf, renderPage, fitWidth, setZoom, hasDoc, isPdfReplacementInProgress, eventToView, viewToPdf, setZoomChangeHandler } from './viewer';
 import { initTools, setTool, setStatusHint, clearTakeoffHistory } from './tools';
 import { initTable, renderTable } from './table';
 import { renderMarkups } from './render';
@@ -16,7 +16,7 @@ import { startSession, stopSession, sessionActive, getPeers, pauseSessionUpdates
 import { loadPresets, loadColumns } from './persistence';
 import { initColumns, renderColumns } from './columns';
 import { initLayers, renderLayers, exportLayerState, importLayerState } from './layers';
-import { scheduleSave, restoreSession } from './persistence';
+import { cancelScheduledSave, scheduleSave, restoreSession } from './persistence';
 import {
   compareState,
   initCompare,
@@ -117,6 +117,7 @@ async function openBytes(bytes: Uint8Array, name: string, notes: string[] = []):
   let openHint = '';
   let cleanupWarning = '';
   try {
+    cancelScheduledSave();
     await loadPdf(bytes, name, { lifecycle: {
       captureRollback: () => { previousLayers = exportLayerState(); resumeSession = pauseSessionUpdates(); },
       initialize: async () => {
@@ -203,6 +204,7 @@ async function openProject(file: File): Promise<void> {
   try {
     await openProjectText(await file.text(), {
       loadDrawing: async (bytes, name, pageNum, projectLifecycle) => {
+        cancelScheduledSave();
         await loadPdf(bytes, name, { pageNum, lifecycle: {
           captureRollback: () => { previousLayers = exportLayerState(); resumeSession = pauseSessionUpdates(); },
           validatePageCount: projectLifecycle.validatePageCount,
@@ -603,7 +605,7 @@ subscribe(() => {
   renderTable();
   renderLayers(); // counts + active layer follow the takeoff
   renderLibrary(); // active-chip highlight follows tool/preset changes
-  scheduleSave(); // debounced persistence of markups + calibrations
+  if (!isPdfReplacementInProgress()) scheduleSave(); // persist only committed viewer state
 });
 
 function scheduleRender(delayMs: number): void {
