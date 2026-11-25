@@ -42,17 +42,29 @@ interface StoredSession {
 }
 
 let saveTimer: number | undefined;
+let saveGeneration = 0;
+
+/** Cancel pending or not-yet-started autosave work before a replacement. */
+export function cancelScheduledSave(): void {
+  saveGeneration++;
+  if (saveTimer !== undefined) window.clearTimeout(saveTimer);
+  saveTimer = undefined;
+}
 
 /** Debounced autosave — call on any state change while a document is open. */
 export function scheduleSave(): void {
   if (!state.fileBytes) return;
-  if (saveTimer) window.clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(() => void save(), 700);
+  if (saveTimer !== undefined) window.clearTimeout(saveTimer);
+  const generation = ++saveGeneration;
+  saveTimer = window.setTimeout(() => {
+    saveTimer = undefined;
+    void save(generation);
+  }, 700);
 }
 
-async function save(): Promise<void> {
+async function save(generation: number): Promise<void> {
   const db = await openDb();
-  if (!db || !state.fileBytes) return;
+  if (generation !== saveGeneration || !db || !state.fileBytes) return;
   const session: StoredSession = {
     markups: state.markups,
     calibrations: [...state.calibrations],

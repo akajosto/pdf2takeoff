@@ -3,7 +3,7 @@
 // drop and paste, and calls openFiles / openSample / startDemo here.
 
 import { state, freezeMarkupCalibration, subscribe, emit } from './state';
-import { initViewer, loadPdf, closePdf, renderPage, fitWidth, setZoom, hasDoc, eventToView, viewToPdf, setZoomChangeHandler } from './viewer';
+import { initViewer, loadPdf, closePdf, renderPage, fitWidth, setZoom, hasDoc, isPdfReplacementInProgress, eventToView, viewToPdf, setZoomChangeHandler } from './viewer';
 import { initTools, setTool, setStatusHint, clearTakeoffHistory } from './tools';
 import { initTable, renderTable } from './table';
 import { renderMarkups } from './render';
@@ -12,11 +12,11 @@ import { playDemo, stopDemo } from './demo';
 import { exportXlsx } from './table';
 import { initPageStrip } from './pagestrip';
 import { initLibrary, renderLibrary } from './library';
-import { startSession, stopSession, sessionActive, getPeers } from './session';
+import { startSession, stopSession, sessionActive, getPeers, pauseSessionUpdates } from './session';
 import { loadPresets, loadColumns } from './persistence';
 import { initColumns, renderColumns } from './columns';
 import { initLayers, renderLayers, exportLayerState, importLayerState } from './layers';
-import { scheduleSave, restoreSession } from './persistence';
+import { cancelScheduledSave, scheduleSave, restoreSession } from './persistence';
 import {
   compareState,
   initCompare,
@@ -38,6 +38,7 @@ import { initNudges } from './nudge';
 import { initWonder } from './fx/wonder';
 import { prepareFiles, ACCEPT } from './inputs';
 import { formatLength, DISPLAY_UNITS, unitLabel } from '../engine/units';
+import { openProjectText, type ProjectFile } from './project-file';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -108,57 +109,65 @@ setStatusHint((text) => {
 // --- file opening ---
 
 async function openBytes(bytes: Uint8Array, name: string, notes: string[] = []): Promise<void> {
-  exitCompare();
-  stopSession(); // a new drawing starts a fresh channel
   $('loading').classList.remove('hidden');
+  let previousLayers: ReturnType<typeof exportLayerState> | undefined;
+  let resumeSession: ((committed?: boolean) => void) | null = null;
+  let restored = 0;
+  let restoreKind = 'pdf';
+  let openHint = '';
+  let cleanupWarning = '';
   try {
-    await loadPdf(bytes, name);
-    clearTakeoffHistory();
+    cancelScheduledSave();
+    await loadPdf(bytes, name, { lifecycle: {
+      captureRollback: () => { previousLayers = exportLayerState(); resumeSession = pauseSessionUpdates(); },
+      initialize: async () => {
+        importLayerState(undefined);
+        restored = await importMarkups();
+        if (!restored) { restored = await restoreSession(bytes); restoreKind = 'session'; }
+      },
+      prepareOverlay: () => { renderMarkups(); },
+      beforeCommit: () => {
+        state.tool = restored ? 'pan' : 'calibrate';
+        openHint = [
+          restored ? (restoreKind === 'pdf'
+            ? 'Restored ' + restored + ' markups from this PDF; calibrate the scale to see values'
+            : 'Restored your last session: ' + restored + ' measurements, scale included')
+            : 'Calibrate the scale to start measuring (press C)',
+          ...notes,
+        ].join(' ');
+        $('toolHint').textContent = openHint;
+      },
+      rollback: () => {
+        const errors: unknown[] = [];
+        try { importLayerState(previousLayers); } catch (error) { errors.push(error); }
+        try { renderMarkups(); } catch (error) { errors.push(error); }
+        try { setTool(state.tool); } catch (error) { errors.push(error); }
+        try { resumeSession?.(false); } catch (error) { errors.push(error); }
+        resumeSession = null;
+        if (errors.length) throw new AggregateError(errors, 'PDF-open application rollback was incomplete.');
+      },
+      finalize: () => {
+        const errors: unknown[] = [];
+        try { resumeSession?.(true); } catch (error) { errors.push(error); }
+        resumeSession = null;
+        for (const action of [exitCompare, stopSession, clearTakeoffHistory]) { try { action(); } catch (error) { errors.push(error); } }
+        if (errors.length) throw new AggregateError(errors, 'PDF-open finalization had cleanup errors.');
+      },
+      onCleanupError: (errors) => { cleanupWarning = 'Previous-document cleanup reported: ' + errors.map(String).join('; '); },
+    } });
+    setTool(restored ? 'pan' : 'calibrate');
+    $('toolHint').textContent = openHint + (cleanupWarning ? ' · ' + cleanupWarning : '');
     window.scrollTo(0, 0);
     dropzone.classList.add('hidden');
-    let restored = await importMarkups();
-    let restoreKind = 'pdf';
-    if (!restored) {
-      restored = await restoreSession(bytes);
-      restoreKind = 'session';
-    }
-    await renderPage();
-    renderMarkups();
-    setTool(restored ? 'pan' : 'calibrate');
-    $('toolHint').textContent = [
-      restored
-        ? restoreKind === 'pdf'
-          ? `Restored ${restored} markups from this PDF; calibrate the scale to see values`
-          : `Restored your last session: ${restored} measurements, scale included`
-        : 'Calibrate the scale to start measuring (press C)',
-      ...notes,
-    ].join(' ');
+    emit();
   } catch (err) {
-    $('toolHint').textContent = `Could not open this file: ${err instanceof Error ? err.message : String(err)}`;
+    $('toolHint').textContent = 'Could not open this file: ' + (err instanceof Error ? err.message : String(err));
+    throw err;
   } finally {
     $('loading').classList.add('hidden');
     emit();
   }
 }
-
-
-type ProjectFile = {
-  format: 'pdf2takeoff-project';
-  version: 1;
-  name: string;
-  drawing: string;
-  pageNum: number;
-  displayUnit: typeof state.displayUnit;
-  markups: typeof state.markups;
-  calibrations: [number, import('../engine/types').Calibration][];
-  viewports: typeof state.viewports;
-  presets: typeof state.presets;
-  columns: typeof state.columns;
-  template: string | null;
-  annotations?: typeof state.annotations;
-  layerState?: ReturnType<typeof exportLayerState>;
-};
-
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
   const chunk = 0x8000;
@@ -166,12 +175,6 @@ function bytesToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunk, bytes.length)));
   }
   return btoa(binary);
-}
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
 }
 function saveProject(): void {
   if (!state.fileBytes || !hasDoc()) { showMessage('Open a drawing before saving a project.'); return; }
@@ -193,40 +196,74 @@ function saveProject(): void {
   $('toolHint').textContent = 'Project saved. Keep the .p2t file to reopen the drawing and its take-off.';
 }
 async function openProject(file: File): Promise<void> {
-  const project = JSON.parse(await file.text()) as ProjectFile;
-  if (project.format !== 'pdf2takeoff-project' || project.version !== 1 || typeof project.drawing !== 'string') {
-    throw new Error('This is not a supported pdf2takeoff project file.');
+  $('loading').classList.remove('hidden');
+  let previousLayers: ReturnType<typeof exportLayerState> | undefined;
+  let resumeSession: ((committed?: boolean) => void) | null = null;
+  let openHint = '';
+  let cleanupWarning = '';
+  try {
+    await openProjectText(await file.text(), {
+      loadDrawing: async (bytes, name, pageNum, projectLifecycle) => {
+        cancelScheduledSave();
+        await loadPdf(bytes, name, { pageNum, lifecycle: {
+          captureRollback: () => { previousLayers = exportLayerState(); resumeSession = pauseSessionUpdates(); },
+          validatePageCount: projectLifecycle.validatePageCount,
+          initialize: projectLifecycle.initialize,
+          prepareOverlay: () => { renderMarkups(); renderColumns(); renderLibrary(); renderLayers(); },
+          beforeCommit: projectLifecycle.beforeCommit,
+          rollback: () => {
+            const errors: unknown[] = [];
+            try { importLayerState(previousLayers); } catch (error) { errors.push(error); }
+            for (const action of [renderMarkups, renderColumns, renderLibrary, renderLayers]) { try { action(); } catch (error) { errors.push(error); } }
+            try { setTool(state.tool); } catch (error) { errors.push(error); }
+            try { resumeSession?.(false); } catch (error) { errors.push(error); }
+            resumeSession = null;
+            if (errors.length) throw new AggregateError(errors, 'Project-open application rollback was incomplete.');
+          },
+          finalize: () => {
+            const errors: unknown[] = [];
+            try { resumeSession?.(true); } catch (error) { errors.push(error); }
+            resumeSession = null;
+            for (const action of [exitCompare, stopSession, clearTakeoffHistory]) { try { action(); } catch (error) { errors.push(error); } }
+            if (errors.length) throw new AggregateError(errors, 'Project-open finalization had cleanup errors.');
+          },
+          onCleanupError: (errors) => { cleanupWarning = 'Previous-document cleanup reported: ' + errors.map(String).join('; '); },
+        } });
+      },
+      applyProject: (project, pageNum) => {
+        state.markups = structuredClone(project.markups ?? []);
+        state.annotations = structuredClone(project.annotations ?? []);
+        state.selectedAnnotationId = null;
+        state.calibrations = new Map(structuredClone(project.calibrations ?? []));
+        state.viewports = structuredClone(project.viewports ?? []);
+        for (const markup of state.markups) freezeMarkupCalibration(markup);
+        state.presets = structuredClone(project.presets ?? []);
+        state.columns = structuredClone(project.columns ?? []);
+        state.template = project.template ?? null;
+        state.displayUnit = project.displayUnit ?? 'm';
+        state.pageNum = pageNum;
+        state.selectedId = null; state.lastAction = null; state.activePreset = null; state.focusLabel = null;
+        state.tool = 'pan';
+        importLayerState(project.layerState);
+      },
+      notifyOpened: (name) => { openHint = 'Opened project: ' + name; $('toolHint').textContent = openHint; },
+    });
+    setTool('pan');
+    $('toolHint').textContent = openHint + (cleanupWarning ? ' · ' + cleanupWarning : '');
+    window.scrollTo(0, 0);
+    dropzone.classList.add('hidden');
+    emit();
+  } finally {
+    $('loading').classList.add('hidden');
+    emit();
   }
-  const bytes = base64ToBytes(project.drawing);
-  await openBytes(bytes, project.name || 'project.pdf');
-  state.markups = Array.isArray(project.markups) ? project.markups : [];
-  state.annotations = Array.isArray(project.annotations) ? project.annotations : [];
-  state.selectedAnnotationId = null;
-  state.calibrations = new Map(Array.isArray(project.calibrations) ? project.calibrations : []);
-  state.viewports = Array.isArray(project.viewports) ? project.viewports : [];
-  // Older .p2t projects did not freeze each measurement's calibration. Freeze
-  // their then-current page/viewport scale once on load; future scale edits are non-retroactive.
-  for (const markup of state.markups) freezeMarkupCalibration(markup);
-  state.presets = Array.isArray(project.presets) ? project.presets : [];
-  state.columns = Array.isArray(project.columns) ? project.columns : [];
-  state.template = project.template ?? null;
-  importLayerState(project.layerState);
-  state.displayUnit = project.displayUnit || 'm';
-  state.pageNum = Math.min(Math.max(1, project.pageNum || 1), state.pageCount);
-  state.selectedId = null;
-  state.lastAction = null;
-  state.activePreset = null;
-  renderMarkups();
-  emit();
-  await renderPage();
-  setTool('pan');
-  $('toolHint').textContent = `Opened project: ${state.fileName}`;
 }
+
 async function closeProject(): Promise<void> {
   if (!hasDoc()) return;
   if (!window.confirm('Close this project? Save it first if you want to keep your latest changes.')) return;
-  stopSession();
   await closePdf();
+  stopSession();
   clearTakeoffHistory();
   state.fileName = '';
   state.fileBytes = null;
@@ -301,9 +338,15 @@ projectInput.addEventListener('change', () => {
 });
 
 export async function openSample(): Promise<void> {
-  const resp = await fetch('examples/sample-floor-plan.pdf');
-  const buf = await resp.arrayBuffer();
-  await openBytes(new Uint8Array(buf), 'sample-floor-plan.pdf');
+  try {
+    const resp = await fetch('examples/sample-floor-plan.pdf');
+    if (!resp.ok) throw new Error('Sample drawing request failed: ' + resp.status);
+    const buf = await resp.arrayBuffer();
+    await openBytes(new Uint8Array(buf), 'sample-floor-plan.pdf');
+  } catch (error) {
+    $('toolHint').textContent = 'Could not open the sample drawing: ' + (error instanceof Error ? error.message : String(error));
+    showMessage($('toolHint').textContent);
+  }
 }
 
 // ?file=/path.pdf — open a same-origin drawing on load (deep links, tests).
@@ -562,7 +605,7 @@ subscribe(() => {
   renderTable();
   renderLayers(); // counts + active layer follow the takeoff
   renderLibrary(); // active-chip highlight follows tool/preset changes
-  scheduleSave(); // debounced persistence of markups + calibrations
+  if (!isPdfReplacementInProgress()) scheduleSave(); // persist only committed viewer state
 });
 
 function scheduleRender(delayMs: number): void {

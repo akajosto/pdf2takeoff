@@ -7,6 +7,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import workerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import type { PDFDocumentProxy, PageViewport, RenderTask } from 'pdfjs-dist';
 import { state, emit } from './state';
+import { awaitPdfRenderTask, cancelAndSettleRenderTask, loadValidatedPdfCandidate, openPdfTask } from './pdf-candidate';
 import { vectorize, type VecPage } from '../engine/vector';
 import { parseImagePages, parseScales, PAPER_KEY, SCALE_KEY } from '../engine/inputs';
 import { METERS_PER_PT } from '../engine/units';
@@ -70,6 +71,8 @@ export function initViewer(
   svg = overlay;
   markupsLayer = ml;
   previewLayer = pl;
+  window.addEventListener('keydown', (event) => { if (replacementInProgress) { event.preventDefault(); event.stopImmediatePropagation(); } }, true);
+  document.addEventListener('click', (event) => { if (replacementInProgress) { event.preventDefault(); event.stopImmediatePropagation(); } }, true);
   bindWheel();
   bindPan();
 }
@@ -83,52 +86,165 @@ export function getPdfDoc(): PDFDocumentProxy | null {
   return doc;
 }
 
-export async function loadPdf(bytes: Uint8Array, name: string): Promise<void> {
-  await closePdf();
-  state.fileName = name;
-  state.fileBytes = bytes;
-  state.pageNum = 1;
-  state.markups = [];
-  state.annotations = [];
-  state.selectedAnnotationId = null;
-  state.selectedId = null;
-  state.calibrations.clear();
-  state.scaleChecks.clear();
-  state.focusLabel = null;
-  const task = pdfjsLib.getDocument({ data: bytes.slice(), ...PDFJS_ASSET_URLS });
-  doc = await task.promise;
-  state.pageCount = doc.numPages;
-  // pages that came from images (opened here, or saved from here and reopened)
-  const meta = await doc.getMetadata().catch(() => null);
-  const custom = (meta?.info as { Custom?: Record<string, unknown> } | undefined)?.Custom;
-  state.imagePages = parseImagePages(custom?.[PAPER_KEY]);
-  // a DXF knows its units: its pages arrive with their scale set
-  for (const [p, s] of parseScales(custom?.[SCALE_KEY])) {
-    state.calibrations.set(p, { metersPerPt: METERS_PER_PT * s.ratio, source: `drawing units (${s.unit}${s.assumed ? ', assumed' : ''}) at 1:${s.ratio}` });
-  }
-  state.zoom = fitWidthZoom();
-  emit();
+export interface PdfLoadLifecycle {
+  captureRollback?(): void;
+  validatePageCount?(pageCount: number): void;
+  initialize?(): void | Promise<void>;
+  prepareOverlay?(): void | Promise<void>;
+  beforeCommit?(): void | Promise<void>;
+  rollback?(): void | Promise<void>;
+  finalize?(): void | Promise<void>;
+  onCleanupError?(errors: unknown[]): void;
 }
-
+export interface PdfLoadOptions { pageNum?: number; lifecycle?: PdfLoadLifecycle; }
+let replacementInProgress = false;
+let workspaceWasInert = false;
+export function isPdfReplacementInProgress(): boolean { return replacementInProgress; }
+function lockWorkspace(): void {
+  workspaceWasInert = scrollEl.inert;
+  try {
+    scrollEl.inert = true;
+    scrollEl.setAttribute('aria-busy', 'true');
+    scrollEl.classList.add('pdf-replacing');
+  } catch (error) {
+    scrollEl.inert = workspaceWasInert;
+    scrollEl.removeAttribute('aria-busy');
+    scrollEl.classList.remove('pdf-replacing');
+    throw error;
+  }
+}
+function unlockWorkspace(): void {
+  scrollEl.inert = workspaceWasInert; scrollEl.removeAttribute('aria-busy'); scrollEl.classList.remove('pdf-replacing');
+}
+async function cancelActiveRender(): Promise<unknown[]> {
+  const active = renderTask; renderTask = null;
+  return cancelAndSettleRenderTask(active);
+}
+export async function loadPdf(bytes: Uint8Array, name: string, options: PdfLoadOptions = {}): Promise<void> {
+  if (replacementInProgress) throw new Error('A PDF replacement is already in progress.');
+  replacementInProgress = true;
+  const lifecycle = options.lifecycle ?? {};
+  const requestedPage = options.pageNum ?? 1;
+  try {
+    lockWorkspace();
+    const result = await loadValidatedPdfCandidate(
+      async () => openPdfTask(pdfjsLib.getDocument({ data: bytes.slice(), ...PDFJS_ASSET_URLS })),
+      async (candidate) => {
+        if (!Number.isInteger(candidate.numPages) || candidate.numPages < 1) throw new Error('The PDF contains no pages.');
+        if (!Number.isInteger(requestedPage) || requestedPage < 1 || requestedPage > candidate.numPages) throw new Error('Requested page is outside the PDF page range.');
+        lifecycle.validatePageCount?.(candidate.numPages);
+        const metadata = await candidate.getMetadata().catch(() => null);
+        const custom = (metadata?.info as { Custom?: Record<string, unknown> } | undefined)?.Custom;
+        const imagePages = parseImagePages(custom?.[PAPER_KEY]);
+        const calibrations = [...parseScales(custom?.[SCALE_KEY]).entries()].map(([page, scale]) => [page, {
+          metersPerPt: METERS_PER_PT * scale.ratio,
+          source: 'drawing units (' + scale.unit + (scale.assumed ? ', assumed' : '') + ') at 1:' + scale.ratio,
+        }] as const);
+        const page = await candidate.getPage(requestedPage);
+        const base = page.getViewport({ scale: 1 });
+        const previewScale = Math.min(0.12, 96 / Math.max(base.width, base.height));
+        const previewViewport = page.getViewport({ scale: previewScale });
+        const preview = document.createElement('canvas');
+        preview.width = Math.max(1, Math.ceil(previewViewport.width));
+        preview.height = Math.max(1, Math.ceil(previewViewport.height));
+        const context = preview.getContext('2d');
+        if (!context) throw new Error('Could not create the PDF validation canvas.');
+        await awaitPdfRenderTask(page.render({ canvas: preview, canvasContext: context, viewport: previewViewport }), () => { preview.width = 0; preview.height = 0; });
+        return { pageCount: candidate.numPages, imagePages, calibrations };
+      },
+      async (candidate, prepared) => {
+        const previousDoc = doc;
+        const previousViewport = viewport1;
+        const previousState = structuredClone(state);
+        const previousScroll = { left: scrollEl.scrollLeft, top: scrollEl.scrollTop };
+        const previousPageStyle = { width: pageEl.style.width, height: pageEl.style.height };
+        const previousCanvasStyle = { width: canvas.style.width, height: canvas.style.height };
+        const previousCanvas = document.createElement('canvas');
+        previousCanvas.width = canvas.width; previousCanvas.height = canvas.height;
+        if (canvas.width && canvas.height) {
+          const copyContext = previousCanvas.getContext('2d');
+          if (!copyContext) throw new Error('Could not preserve the current PDF canvas.');
+          copyContext.drawImage(canvas, 0, 0);
+        }
+        const previousSvg = { viewBox: svg.getAttribute('viewBox'), width: svg.getAttribute('width'), height: svg.getAttribute('height') };
+        const previousFirstRender = onFirstRender;
+        const candidateBytes = bytes.slice();
+        const candidateCalibrations = new Map(prepared.calibrations);
+        const candidateImagePages = new Map(prepared.imagePages);
+        const transaction = {
+          rollback: async () => {
+            const errors: unknown[] = await cancelActiveRender();
+            renderSeq++; doc = previousDoc; viewport1 = previousViewport; onFirstRender = previousFirstRender;
+            try {
+              Object.assign(state, previousState);
+              pageEl.style.width = previousPageStyle.width; pageEl.style.height = previousPageStyle.height;
+              canvas.style.width = previousCanvasStyle.width; canvas.style.height = previousCanvasStyle.height;
+              canvas.width = previousCanvas.width; canvas.height = previousCanvas.height;
+              if (canvas.width && canvas.height) {
+                const context = canvas.getContext('2d');
+                if (!context) throw new Error('Could not restore the previous PDF canvas context.');
+                context.clearRect(0, 0, canvas.width, canvas.height); context.drawImage(previousCanvas, 0, 0);
+              }
+              if (previousSvg.viewBox === null) svg.removeAttribute('viewBox'); else svg.setAttribute('viewBox', previousSvg.viewBox);
+              if (previousSvg.width === null) svg.removeAttribute('width'); else svg.setAttribute('width', previousSvg.width);
+              if (previousSvg.height === null) svg.removeAttribute('height'); else svg.setAttribute('height', previousSvg.height);
+              scrollEl.scrollLeft = previousScroll.left; scrollEl.scrollTop = previousScroll.top;
+            } catch (error) { errors.push(error); }
+            try { await lifecycle.rollback?.(); } catch (error) { errors.push(error); }
+            const candidateDetached = doc !== candidate;
+            try { emit(); } catch (error) { errors.push(error); }
+            return { candidateDetached, rollbackComplete: errors.length === 0, errors };
+          },
+          finalize: async () => {
+            const errors: unknown[] = [];
+            try { await lifecycle.finalize?.(); } catch (error) { errors.push(error); }
+            if (previousDoc) { try { await previousDoc.destroy(); } catch (error) { errors.push(error); } }
+            try { emit(); } catch (error) { errors.push(error); }
+            if (errors.length) throw new AggregateError(errors, 'PDF replacement committed, but cleanup reported errors.');
+          },
+        };
+        try { lifecycle.captureRollback?.(); }
+        catch (error) {
+          const errors: unknown[] = [error];
+          try { await lifecycle.rollback?.(); } catch (rollbackError) { errors.push(rollbackError); }
+          throw errors.length === 1 ? error : new AggregateError(errors, 'Could not capture replacement rollback state.');
+        }
+        // No fallible work remains after ownership is switched to the candidate.
+        state.fileName = name; state.fileBytes = candidateBytes; state.pageCount = prepared.pageCount; state.pageNum = requestedPage;
+        state.markups = []; state.annotations = []; state.selectedAnnotationId = null;
+        state.selectedId = null; state.calibrations = candidateCalibrations;
+        state.imagePages = candidateImagePages; state.scaleChecks = new Map(); state.viewports = [];
+        state.focusLabel = null; state.lastAction = null; state.activePreset = null;
+        state.zoom = 1; state.fit = 'width';
+        doc = candidate; viewport1 = null;
+        return transaction;
+      },
+      async () => {
+        await lifecycle.initialize?.();
+        await lifecycle.prepareOverlay?.();
+        await renderPage({ strict: true });
+        await lifecycle.beforeCommit?.();
+      },
+      async (candidate) => { await candidate.destroy(); },
+    );
+    if (result.cleanupErrors.length) {
+      try {
+        if (lifecycle.onCleanupError) lifecycle.onCleanupError(result.cleanupErrors);
+        else console.error('PDF replacement cleanup errors:', result.cleanupErrors);
+      } catch (reportError) { console.error('Could not report PDF replacement cleanup errors:', reportError); }
+    }
+  } finally {
+    if (scrollEl.classList.contains('pdf-replacing')) { try { unlockWorkspace(); } catch (error) { console.error('Could not unlock PDF workspace:', error); } }
+    replacementInProgress = false;
+  }
+}
 export async function closePdf(): Promise<void> {
-  if (renderTask) {
-    try {
-      renderTask.cancel();
-    } catch {
-      /* cancelled */
-    }
-    renderTask = null;
-  }
-  if (doc) {
-    try {
-      await doc.destroy();
-    } catch {
-      /* already destroyed */
-    }
-    doc = null;
-  }
+  if (replacementInProgress) throw new Error('Cannot close a PDF while replacement is in progress.');
+  const errors = await cancelActiveRender();
+  const previous = doc; doc = null; viewport1 = null;
+  if (previous) { try { await previous.destroy(); } catch (error) { errors.push(error); } }
+  if (errors.length) throw new AggregateError(errors, 'PDF close completed with cleanup errors.');
 }
-
 // per-page caches for the open document (geometry and text never change
 // while it is open); keyed by the document so a new load starts fresh
 type TextItems = { str?: string; transform?: number[]; width?: number; height?: number }[];
@@ -225,28 +341,21 @@ export async function getPageAnnotations(pageNum: number) {
   return page.getAnnotations({ intent: 'display' });
 }
 
-export async function renderPage(): Promise<void> {
-  if (!doc) return;
+export async function renderPage(options: { strict?: boolean } = {}): Promise<void> {
+  const currentDoc = doc;
+  if (!currentDoc) return;
   const mySeq = ++renderSeq;
-  if (renderTask) {
-    try {
-      renderTask.cancel();
-    } catch {
-      /* cancelled */
-    }
-    renderTask = null;
-  }
-  const page = await doc.getPage(state.pageNum);
-  if (mySeq !== renderSeq) return; // superseded
+  const cancelErrors = await cancelActiveRender();
+  if (options.strict && cancelErrors.length) throw new AggregateError(cancelErrors, 'Previous PDF render did not settle cleanly.');
+  if (mySeq !== renderSeq || doc !== currentDoc) return;
+  const page = await currentDoc.getPage(state.pageNum);
+  if (mySeq !== renderSeq || doc !== currentDoc) return;
   viewport1 = page.getViewport({ scale: 1 });
-
-  // SVG overlay geometry is zoom-independent; size only changes with the page.
-  svg.setAttribute('viewBox', `0 0 ${viewport1.width} ${viewport1.height}`);
-
+  if (state.fit === 'width') state.zoom = fitWidthZoom();
+  svg.setAttribute('viewBox', '0 0 ' + viewport1.width + ' ' + viewport1.height);
   applyLayoutSize();
-  await paintCanvas(page, mySeq);
+  await paintCanvas(page, mySeq, options.strict ?? false);
 }
-
 function fitWidthZoom(): number {
   if (!viewport1) return 1;
   const available = scrollEl.clientWidth - 64;
@@ -255,11 +364,13 @@ function fitWidthZoom(): number {
 
 export function fitWidth(): void {
   if (!viewport1) return;
+  state.fit = 'width';
   state.zoom = fitWidthZoom();
   emit();
 }
 
 export function setZoom(z: number): void {
+  state.fit = null;
   state.zoom = clampZoom(z);
   emit();
 }
@@ -280,6 +391,7 @@ export function zoomAt(clientX: number, clientY: number, factor: number): void {
   const pointerY = clientY - scrollRect.top;
   const pageX = localX / z1;
   const pageY = localY / z1;
+  state.fit = null;
   state.zoom = z2;
   previewResize();
 
@@ -322,54 +434,32 @@ function previewResize(): void {
   applyLayoutSize();
 }
 
-async function paintCanvas(page: pdfjsLib.PDFPageProxy, mySeq: number): Promise<void> {
+async function paintCanvas(page: pdfjsLib.PDFPageProxy, mySeq: number, strict = false): Promise<void> {
   const viewport = page.getViewport({ scale: state.zoom });
   let dpr = Math.min(window.devicePixelRatio || 1, 3);
-  const px = viewport.width * dpr;
-  const py = viewport.height * dpr;
-  if (px * py > MAX_CANVAS_PIXELS) {
-    dpr = Math.max(1, Math.sqrt(MAX_CANVAS_PIXELS / (viewport.width * viewport.height)));
-  }
-
-  // Render off-screen. Resizing the visible canvas clears it immediately and
-  // caused a blank flash while PDF.js rasterised complex sheets. Keep the last
-  // completed frame visible until this render is ready to be swapped in.
+  if (viewport.width * dpr * viewport.height * dpr > MAX_CANVAS_PIXELS) dpr = Math.max(1, Math.sqrt(MAX_CANVAS_PIXELS / (viewport.width * viewport.height)));
   const nextCanvas = document.createElement('canvas');
   nextCanvas.width = Math.max(1, Math.floor(viewport.width * dpr));
   nextCanvas.height = Math.max(1, Math.floor(viewport.height * dpr));
-  const ctx = nextCanvas.getContext('2d');
-  if (!ctx) return;
-  const task = page.render({
-    canvas: nextCanvas,
-    canvasContext: ctx,
-    viewport,
-    transform: dpr === 1 ? undefined : [dpr, 0, 0, dpr, 0, 0],
-  });
+  const context = nextCanvas.getContext('2d');
+  if (!context) throw new Error('Could not create the PDF render canvas.');
+  const task = page.render({ canvas: nextCanvas, canvasContext: context, viewport, transform: dpr === 1 ? undefined : [dpr, 0, 0, dpr, 0, 0] });
   renderTask = task;
-  try {
-    await task.promise;
-  } catch {
+  try { await task.promise; }
+  catch (error) {
     if (renderTask === task) renderTask = null;
-    return; // cancelled or superseded
-  }
-  if (mySeq !== renderSeq) {
-    if (renderTask === task) renderTask = null;
+    if (mySeq !== renderSeq) return;
+    if (strict) throw error;
     return;
   }
-
-  canvas.width = nextCanvas.width;
-  canvas.height = nextCanvas.height;
-  const visible = canvas.getContext('2d');
-  if (visible) visible.drawImage(nextCanvas, 0, 0);
-  applyLayoutSize();
-
-  if (onFirstRender) {
-    onFirstRender();
-    onFirstRender = null;
-  }
   if (renderTask === task) renderTask = null;
+  if (mySeq !== renderSeq || !doc) return;
+  canvas.width = nextCanvas.width; canvas.height = nextCanvas.height;
+  const visible = canvas.getContext('2d');
+  if (!visible) throw new Error('Could not access the visible PDF canvas.');
+  visible.drawImage(nextCanvas, 0, 0); applyLayoutSize();
+  if (onFirstRender) { try { onFirstRender(); } catch (error) { console.error('First-render callback failed:', error); } finally { onFirstRender = null; } }
 }
-
 export function viewSize(): { w: number; h: number } {
   return viewport1 ? { w: viewport1.width, h: viewport1.height } : { w: 0, h: 0 };
 }
@@ -406,6 +496,7 @@ function bindWheel(): void {
   window.addEventListener(
     'wheel',
     (e) => {
+      if (replacementInProgress && e.target instanceof Node && scrollEl.contains(e.target)) { e.preventDefault(); e.stopImmediatePropagation(); return; }
       if (!doc || !(e.target instanceof Node) || !scrollEl.contains(e.target)) return;
       e.preventDefault();
       e.stopPropagation();
@@ -427,7 +518,7 @@ function bindWheel(): void {
   // Double-click zoom is navigation-only. Measurement tools retain their
   // existing double-click-to-finish gesture.
   svg.addEventListener('dblclick', (e) => {
-    if (!doc || state.tool !== 'pan') return;
+    if (replacementInProgress || !doc || state.tool !== 'pan') return;
     e.preventDefault();
     e.stopImmediatePropagation();
     zoomAt(e.clientX, e.clientY, 1.5);
@@ -448,7 +539,7 @@ function bindPan(): void {
   });
 
   svg.addEventListener('pointerdown', (e) => {
-    if (!doc) return;
+    if (replacementInProgress || !doc) return;
     const middlePan = e.button === 1;
     const spacePan = e.button === 0 && spaceDown;
     const toolPan = e.button === 0 && state.tool === 'pan';
